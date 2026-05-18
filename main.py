@@ -41,14 +41,14 @@ async def init_db():
                 chat_id BIGINT PRIMARY KEY,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-        ''')
+        ''');
         # Таблиця для унікальних користувачів
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-        ''')
+        ''');
         logger.info("База даних успішно ініціалізована, таблиці створені!")
     except Exception as e:
         logger.error(f"Помилка ініціалізації БД: {e}")
@@ -66,7 +66,7 @@ async def log_chat_to_db(chat_id: int):
         logger.error(f"Помилка запису чату в БД: {e}")
 
 async def log_user_to_db(user_id: int):
-    """Записує користувача в базу, if new"""
+    """Записує користувача в базу, якщо він новий"""
     if not DATABASE_URL: return
     try:
         conn = await asyncpg.connect(DATABASE_URL)
@@ -97,9 +97,9 @@ def get_user_name(user: types.User) -> str:
 RULES_TEXT = (
     "Вітаємо у грі <a href='https://t.me/100photobot'>100 PHOTO</a>!\n\n"
     "Правила гри:\n\n"
-    "1. Завдання гравців – фотографувати числа (1, 2, 3) і надсилати у цей чат.\n\n"
+    "1. Завдання гравців – фотографувати числа (1, 2, 3) i надсилати у цей чат.\n\n"
     "2. Безоплатна гра триває 10 раундів, платна – 100 раундів. 1 раунд = 1 photo. За кожне photo гравець отримує 1 бал.\n\n"
-    "3. Числа не можна створювати (викладати предметами) або писати самому. Лише photoграфувати їх вдома, на вулиці тощо.\n\n"
+    "3. Числа не можна створювати (викладати предметами) або писати самому. Лише фотографувати їх вдома, на вулиці тощо.\n\n"
     "4. Не можна повторювати двічі числа з однієї локації (номери сторінок у книзі, номери паркомісць тощо). Локації мають бути різними.\n\n"
     "5. Якщо надіслане фото не відповідає правилам, це фото можна відмінити і почати раунд заново.\n\n"
     "Щоб перезапустити бота, напишіть в чат команду /start або /play.\n\n"
