@@ -116,19 +116,13 @@ def get_main_keyboard():
 
 # --- ЛОГІКА ТЕЛЕГРАМ БОТА ---
 
-# 1. КОМАНДА СТАТИСТИКИ ДЛЯ ВОВА (/stat або /admin_stats)
 @dp.message(F.text.in_({"/stat", "/stats", "/admin_stats", "Стат"}))
 async def show_admin_stats(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
-
-    # Беремо дані з Supabase
     db_chats, db_users = await get_db_stats()
-
-    # Рахуємо активні ігри в оперативці
     active_chats = len(GAMES_DATA)
     active_users = sum(len(game["scores"]) for game in GAMES_DATA.values())
-
     stats_text = (
         "📊 **АКТУАЛЬНА СТАТИСТИКА БОТА (Supabase)**\n\n"
         "🗄️ **Збережено в базі даних назавжди:**\n"
@@ -140,7 +134,6 @@ async def show_admin_stats(message: types.Message):
     )
     await message.answer(stats_text, parse_mode="Markdown")
 
-# 2. АВТО-ЗАПУСК: КОЛИ БОТА ДОДАЮТЬ В ГРУПУ
 @dp.message(F.new_chat_members)
 async def on_bot_join(message: types.Message):
     bot_added = any(member.id == bot.id for member in message.new_chat_members)
@@ -149,14 +142,12 @@ async def on_bot_join(message: types.Message):
         await log_user_to_db(message.from_user.id)
         await message.answer(RULES_TEXT, parse_mode="HTML", reply_markup=get_main_keyboard(), disable_web_page_preview=True)
 
-# 3. ЗАПУСК ПО КОМАНДАХ В ЧАТІ
 @dp.message(F.text.in_({"/start", "/game", "/play", "Старт", "game", "play", "Start"}))
 async def on_command_start(message: types.Message):
     await log_chat_to_db(message.chat.id)
     await log_user_to_db(message.from_user.id)
     await message.answer(RULES_TEXT, parse_mode="HTML", reply_markup=get_main_keyboard(), disable_web_page_preview=True)
 
-# 4. ОБРОБКА КЛІКІВ НА КНОПКИ
 @dp.callback_query()
 async def process_callbacks(callback: types.CallbackQuery):
     chat_id = callback.message.chat.id
@@ -170,14 +161,12 @@ async def process_callbacks(callback: types.CallbackQuery):
             return
             
         await log_chat_to_db(chat_id)
-
         GAMES_DATA[chat_id] = {
             "status": "free",
             "round": 1,
             "scores": {},
             "history": []
         }
-        
         text = "Завдання: 1\n\nРахунок\nГравець 1: 0\nГравець 2: 0\n\nЗнайди і сфотографуй число 1."
         await callback.message.answer(text)
         await callback.answer()
@@ -203,7 +192,6 @@ async def show_payment_post(chat_id: int):
     ])
     await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
 
-# 5. ОБРОБНИК ФОТОГРАФІЙ (ІГРОВИЙ ЦИКЛ)
 @dp.message(F.photo)
 async def handle_game_photo(message: types.Message):
     chat_id = message.chat.id
@@ -212,7 +200,6 @@ async def handle_game_photo(message: types.Message):
         
     game = GAMES_DATA[chat_id]
     user_name = get_user_name(message.from_user)
-    
     await log_user_to_db(message.from_user.id)
     
     chat_member_count = await bot.get_chat_member_count(chat_id)
@@ -254,7 +241,6 @@ async def handle_game_photo(message: types.Message):
     ])
     await message.answer(task_text, reply_markup=kb)
 
-# 6. РЕАЛІЗАЦІЯ КНОПКИ [ ОБНУЛИТИ РАУНД ]
 @dp.callback_query(F.data == "cancel_last")
 async def cancel_last_round(callback: types.CallbackQuery):
     chat_id = callback.message.chat.id
@@ -273,17 +259,20 @@ async def cancel_last_round(callback: types.CallbackQuery):
     await callback.message.answer(task_text)
     await callback.answer("Останній раунд скасовано!")
 
-# ІГНОРУВАННЯ ІНШОГО ТЕКСТУ
 @dp.message()
 async def ignore_text_messages(message: types.Message):
     pass
 
-# --- НАЛАШТУВАННЯ ВЕБХУКІВ ДЛЯ FASTAPI ---
+# --- НАЛАШТУВАННЯ ВЕБХУКІВ ДЛЯ FASTAPI (ВИПРАВЛЕНИЙ СТАНДАРТ) ---
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
-    json_str = await request.json()
-    update = Update.model_validate(json_str, context={"bot": bot})
-    await dp.feed_update(bot, update)
+    try:
+        json_str = await request.json()
+        # Нова повністю безпечна обробка апдейту aiogram
+        update = Update(**json_str)
+        await dp.feed_update(bot, update)
+    except Exception as e:
+        logger.error(f"Помилка всередині вебхука: {e}")
     return {"status": "ok"}
 
 @app.get("/")
@@ -292,11 +281,8 @@ async def root():
 
 @app.on_event("startup")
 async def on_startup():
-    # Запуск створення таблиць у базі даних Supabase
     await init_db()
-    
     if BASE_URL:
-        # ПРИМУСОВЕ АВТОМАТИЧНЕ ОНОВЛЕННЯ ВЕБХУКА ПРИ КОЖНОМУ ЗАПУСКУ:
         logger.info("Оновлення вебхука в Telegram...")
         try:
             await bot.delete_webhook(drop_pending_updates=True)
