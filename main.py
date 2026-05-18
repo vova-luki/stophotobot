@@ -14,8 +14,15 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 app = FastAPI()
 
-# База даних у пам'яті для відстеження ігор у чатах
+# --- СТАТИСТИКА ТА ДАНІ ---
 GAMES_DATA = {} 
+
+# ТИМЧАСОВІ ЛІЧИЛЬНИКИ ЗА ВСЕЙ ЧАС (поки немає БД, живуть до перезапуску сервера)
+TOTAL_CHATS_EVER = 0
+TOTAL_USERS_EVER = set()  # Зберігає унікальних людей за весь час
+
+# Твій особистий Telegram ID для доступу до команди /admin_stats
+ADMIN_ID = 124303561 
 
 def get_user_name(user: types.User) -> str:
     if user.first_name:
@@ -24,17 +31,43 @@ def get_user_name(user: types.User) -> str:
 
 # --- ЛОГІКА ТЕЛЕГРАМ БОТА ---
 
-# 1. ТРИГЕР: ПІДКЛЮЧЕННЯ В ЧАТ АБО КОМАНДИ /start, /game, /play (ПРАВИЛА СУВОРO ЗА ДОКУМЕНТОМ)
+# 1. СЕКРЕТНА АДМІН-КОМАНДА ДЛЯ ВОВА
+@dp.message(F.text == "/admin_stats")
+async def show_admin_stats(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        # Якщо пише не адмін — бот просто ігнорує
+        return
+
+    # Рахуємо поточні активні дані
+    active_chats = len(GAMES_DATA)
+    active_users = 0
+    for chat_id, game in GAMES_DATA.items():
+        active_users += len(game["scores"])
+
+    stats_text = (
+        "📊 **АКТУАЛЬНА СТАТИСТИКА БОТА**\n\n"
+        "⏳ **За весь час (до перезапуску):**\n"
+        f"├ Всього підключено чатів: {TOTAL_CHATS_EVER}\n"
+        f"└ Всього унікальних людей: {len(TOTAL_USERS_EVER)}\n\n"
+        "🚀 **Прямо зараз в реальному часі:**\n"
+        f"├ Активних сесій (ігор): {active_chats}\n"
+        f"└ Грає людей в цих чатах: {active_users}"
+    )
+    await message.answer(stats_text, parse_mode="Markdown")
+
+# 2. ТРИГЕР: ПІДКЛЮЧЕННЯ В ЧАТ АБО КОМАНДИ /start, /game, /play
 @dp.message(F.new_chat_members)
-@dp.message(F.text.in_({"/start", "/game", "/play", "Старт", "game", "play", "Start"}))  # Бот реагує на будь-яку з цих команд
+@dp.message(F.text.in_({"/start", "/game", "/play", "Старт", "game", "play", "Start"}))
 async def on_bot_join_or_command(message: types.Message):
-    # Якщо це подія входу нових учасників, реагуємо лише якщо додали нашого бота
     if message.new_chat_members:
         bot_added = any(member.id == bot.id for member in message.new_chat_members)
         if not bot_added:
             return
 
-    # Текст повністю без змін із твого файлу
+    # Записуємо користувача в загальну статистику за весь час
+    TOTAL_USERS_EVER.add(message.from_user.id)
+
+    # Твій новий оновлений текст повідомлення
     rules_text = (
         "Вітаємо у грі <a href='https://t.me/100photobot'>100 PHOTO</a>!\n\n"
         "Правила гри:\n\n"
@@ -56,12 +89,12 @@ async def on_bot_join_or_command(message: types.Message):
     
     await message.answer(rules_text, parse_mode="HTML", reply_markup=kb, disable_web_page_preview=True)
 
-# 2. ОБРОБКА КЛІКІВ НА КНОПКИ
+# 3. ОБРОБКА КЛІКІВ НА КНОПКИ
 @dp.callback_query()
 async def process_callbacks(callback: types.CallbackQuery):
+    global TOTAL_CHATS_EVER
     chat_id = callback.message.chat.id
     
-    # Кнопка: Почати безкоштовну гру до 10
     if callback.data == "start_free":
         chat_member_count = await bot.get_chat_member_count(chat_id)
         if chat_member_count > 2:
@@ -69,6 +102,10 @@ async def process_callbacks(callback: types.CallbackQuery):
             await show_payment_post(chat_id)
             return
             
+        # Якщо гра в цьому чаті запускається вперше — додаємо в лічильник за весь час
+        if chat_id not in GAMES_DATA:
+            TOTAL_CHATS_EVER += 1
+
         GAMES_DATA[chat_id] = {
             "status": "free",
             "round": 1,
@@ -76,24 +113,18 @@ async def process_callbacks(callback: types.CallbackQuery):
             "history": []
         }
         
-        # Текст повідомлення "ЗАВДАННЯ 1" суворо за документом
         text = "Завдання: 1\n\nРахунок\nГравець 1: 0\nГравець 2: 0\n\nЗнайди і сфотографуй число 1."
         await callback.message.answer(text)
         await callback.answer()
 
-    # Кнопка: Тригер виклику вікна оплати
     elif callback.data == "trigger_pay":
         await show_payment_post(chat_id)
         await callback.answer()
         
-    # Кнопка: [ КУПИТИ PRO-ВЕРСІЮ ] (Тимчасова заглушка для перевірки Monobank)
     elif callback.data == "buy_pro":
-        await callback.message.answer(
-            "Обробка запиту... Платіжна система налаштовується еквайрингом."
-        )
+        await callback.message.answer("Обробка запиту... Платіжна система налаштовується еквайрингом.")
         await callback.answer()
 
-# ПОСТ "ОПЛАТА" СУВОРO ЗА ДОКУМЕНТОМ
 async def show_payment_post(chat_id: int):
     text = (
         "Pro-версія гри:\n"
@@ -107,7 +138,7 @@ async def show_payment_post(chat_id: int):
     ])
     await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
 
-# 3. ОБРОБНИК ФОТОГРАФІЙ (ІГРОВИЙ ЦИКЛ)
+# 4. ОБРОБНИК ФОТОГРАФІЙ (ІГРОВИЙ ЦИКЛ)
 @dp.message(F.photo)
 async def handle_game_photo(message: types.Message):
     chat_id = message.chat.id
@@ -117,6 +148,9 @@ async def handle_game_photo(message: types.Message):
         
     game = GAMES_DATA[chat_id]
     user_name = get_user_name(message.from_user)
+    
+    # Додаємо гравця до унікальних за весь час, як тільки він надіслав ігрове фото
+    TOTAL_USERS_EVER.add(message.from_user.id)
     
     chat_member_count = await bot.get_chat_member_count(chat_id)
     if game["status"] == "free" and chat_member_count > 2:
@@ -129,12 +163,9 @@ async def handle_game_photo(message: types.Message):
     game["scores"][user_name] = game["scores"].get(user_name, 0) + 1
     game["history"].append((user_name, current_round))
     
-    # ПЕРЕВІРКА НА ФІНАЛ ГРИ
     if current_round >= max_rounds:
         winner = max(game["scores"], key=game["scores"].get)
         scores_text = "\n".join([f"{u}: {s}" for u, s in game["scores"].items()])
-        
-        # Текст фіналу суворо за ТЗ
         fin_text = f"Переможець: {winner}\n\nРахунок:\n{scores_text}\n\nНе забудь про свій приз!"
         
         kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -147,12 +178,9 @@ async def handle_game_photo(message: types.Message):
         GAMES_DATA.pop(chat_id, None)
         return
 
-    # НАСТУПНИЙ РАУНД
     game["round"] += 1
     next_round = game["round"]
     scores_text = "\n".join([f"{u}: {s}" for u, s in game["scores"].items()])
-    
-    # Структура тексту раундів суворо за документом
     task_text = f"Завдання: {next_round}\n\n{scores_text}\n\nЗнайди і сфотографуй число {next_round}."
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -161,10 +189,9 @@ async def handle_game_photo(message: types.Message):
         [InlineKeyboardButton(text="[ НОВА ГРА ДО 100 ]", callback_data="trigger_pay")],
         [InlineKeyboardButton(text="[ ДОДАТИ ГРАВЦІВ ]", callback_data="trigger_pay")]
     ])
-        
     await message.answer(task_text, reply_markup=kb)
 
-# 4. РЕАЛІЗАЦІЯ КНОПКИ [ ОБНУЛИТИ РАУНД ]
+# 5. РЕАЛІЗАЦІЯ КНОПКИ [ ОБНУЛИТИ РАУНД ]
 @dp.callback_query(F.data == "cancel_last")
 async def cancel_last_round(callback: types.CallbackQuery):
     chat_id = callback.message.chat.id
@@ -174,19 +201,16 @@ async def cancel_last_round(callback: types.CallbackQuery):
         
     game = GAMES_DATA[chat_id]
     last_user, last_round = game["history"].pop()
-    
     if last_user in game["scores"] and game["scores"][last_user] > 0:
         game["scores"][last_user] -= 1
         
     game["round"] = last_round
-    
     scores_text = "\n".join([f"{u}: {s}" for u, s in game["scores"].items()])
     task_text = f"Раунд скасовано!\n\nЗавдання: {last_round}\n\n{scores_text}\n\nЗнайди і сфотографуй число {last_round}."
-    
     await callback.message.answer(task_text)
     await callback.answer("Останній раунд скасовано!")
 
-# 5. СУВОРЕ ІГНОРУВАННЯ БУДЬ-ЯКОГО ІНШОГО ТЕКСТУ ЗА ТЗ
+# ІГНОРУВАННЯ ТЕКСТУ
 @dp.message()
 async def ignore_text_messages(message: types.Message):
     pass
@@ -195,7 +219,7 @@ async def ignore_text_messages(message: types.Message):
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
     json_str = await request.json()
-    update = Update.model_validate(json_str, context={"bot": bot})
+    update = Update.model_validate(json_str, update, context={"bot": bot})
     await dp.feed_update(bot, update)
     return {"status": "ok"}
 
