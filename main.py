@@ -30,7 +30,7 @@ ADMIN_ID = 124303561
 async def init_db():
     """Створює таблиці в Supabase, якщо їх немає"""
     if not DATABASE_URL:
-        logger.error("DATABASE_URL не знайдено в змінних оточення!")
+        logger.error("DATABASE_URL не знайдено v змінних оточення!")
         return
     
     conn = await asyncpg.connect(DATABASE_URL)
@@ -63,7 +63,7 @@ async def log_chat_to_db(chat_id: int):
         await conn.execute('INSERT INTO chats (chat_id) VALUES ($1) ON CONFLICT (chat_id) DO NOTHING', chat_id)
         await conn.close()
     except Exception as e:
-        logger.error(f"Помилка запису чату в БД: {e}")
+        logger.error(f"Помилка запису чату v БД: {e}")
 
 async def log_user_to_db(user_id: int):
     """Записує користувача в базу, якщо він новий"""
@@ -73,7 +73,7 @@ async def log_user_to_db(user_id: int):
         await conn.execute('INSERT INTO users (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING', user_id)
         await conn.close()
     except Exception as e:
-        logger.error(f"Помилка запису користувача в БД: {e}")
+        logger.error(f"Помилка запису користувача v БД: {e}")
 
 async def get_db_stats():
     """Рахує унікальні дані з Supabase"""
@@ -89,9 +89,9 @@ async def get_db_stats():
         return 0, 0
 
 def get_user_name(user: types.User) -> str:
-    if user.first_name:
+    if user and user.first_name:
         return user.first_name
-    return f"@{user.username}" if user.username else f"ID: {user.id}"
+    return f"@{user.username}" if user and user.username else f"ID: {user.id if user else 'Unknown'}"
 
 # --- ТЕКСТ ПРАВИЛ ТА КНОПКИ ---
 RULES_TEXT = (
@@ -125,12 +125,12 @@ async def show_admin_stats(message: types.Message):
     active_users = sum(len(game["scores"]) for game in GAMES_DATA.values())
     stats_text = (
         "📊 **АКТУАЛЬНА СТАТИСТИКА БОТА (Supabase)**\n\n"
-        "🗄️ **Збережено в базі даних назавжди:**\n"
+        "🗄️ **Збережено v базі даних назавжди:**\n"
         f"├ Всього підключено чатів: {db_chats}\n"
         f"└ Всього унікальних людей: {db_users}\n\n"
-        "🚀 **Прямо зараз в реальному часі:**\n"
+        "🚀 **Прямо зараз v реальному часі:**\n"
         f"├ Активних сесій (ігор): {active_chats}\n"
-        f"└ Грає людей в цих чатах: {active_users}"
+        f"└ Грає людей v цих чатах: {active_users}"
     )
     await message.answer(stats_text, parse_mode="Markdown")
 
@@ -200,4 +200,93 @@ async def handle_game_photo(message: types.Message):
         return
         
     game = GAMES_DATA[chat_id]
-    user_name = get_user_name(message.from
+    user_name = get_user_name(message.from_user)
+    await log_user_to_db(message.from_user.id)
+    
+    chat_member_count = await bot.get_chat_member_count(chat_id)
+    if game["status"] == "free" and chat_member_count > 3:
+        await show_payment_post(chat_id)
+        return
+
+    current_round = game["round"]
+    max_rounds = 10
+    
+    game["scores"][user_name] = game["scores"].get(user_name, 0) + 1
+    game["history"].append((user_name, current_round))
+    
+    if current_round >= max_rounds:
+        winner = max(game["scores"], key=game["scores"].get)
+        scores_text = "\n".join([f"{u}: {s}" for u, s in game["scores"].items()])
+        fin_text = f"Переможець: {winner}\n\nРахунок:\n{scores_text}\n\nНе забудь про свій приз!"
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="[ ОБНУЛИТИ РАУНД 10 ]", callback_data="cancel_last")],
+            [InlineKeyboardButton(text="[ НОВА ГРА ДО 10 ]", callback_data="start_free")],
+            [InlineKeyboardButton(text="[ НОВА ГРА ДО 100 ]", callback_data="trigger_pay")],
+            [InlineKeyboardButton(text="[ ДОДАТИ ГРАВЦІВ ]", callback_data="trigger_pay")]
+        ])
+        await message.answer(fin_text, reply_markup=kb)
+        GAMES_DATA.pop(chat_id, None)
+        return
+
+    game["round"] += 1
+    next_round = game["round"]
+    scores_text = "\n".join([f"{u}: {s}" for u, s in game["scores"].items()])
+    task_text = f"Завдання: {next_round}\n\n{scores_text}\n\nЗнайди і сфотографуй число {next_round}."
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"[ ОБНУЛИТИ РАУНД {next_round-1} ]", callback_data="cancel_last")],
+        [InlineKeyboardButton(text="[ НОВА ГРА ДО 10 ]", callback_data="start_free")],
+        [InlineKeyboardButton(text="[ НОВА ГРА ДО 100 ]", callback_data="trigger_pay")],
+        [InlineKeyboardButton(text="[ ДОДАТИ ГРАВЦІВ ]", callback_data="trigger_pay")]
+    ])
+    await message.answer(task_text, reply_markup=kb)
+
+@dp.callback_query(F.data == "cancel_last")
+async def cancel_last_round(callback: types.CallbackQuery):
+    chat_id = callback.message.chat.id
+    if chat_id not in GAMES_DATA or not GAMES_DATA[chat_id]["history"]:
+        await callback.answer("Немає раундів для скасування!", show_alert=True)
+        return
+        
+    game = GAMES_DATA[chat_id]
+    last_user, last_round = game["history"].pop()
+    if last_user in game["scores"] and game["scores"][last_user] > 0:
+        game["scores"][last_user] -= 1
+        
+    game["round"] = last_round
+    scores_text = "\n".join([f"{u}: {s}" for u, s in game["scores"].items()])
+    task_text = f"Раунд скасовано!\n\nЗавдання: {last_round}\n\n{scores_text}\n\nЗнайди і сфотографуй число {last_round}."
+    await callback.message.answer(task_text)
+    await callback.answer("Останній раунд скасовано!")
+
+@dp.message()
+async def ignore_text_messages(message: types.Message):
+    pass
+
+# --- НАЛАШТУВАННЯ ВЕБХУКІВ ДЛЯ FASTAPI ---
+@app.post("/webhook")
+async def telegram_webhook(request: Request):
+    try:
+        json_str = await request.json()
+        update = Update(**json_str)
+        await dp.feed_update(bot, update)
+    except Exception as e:
+        logger.error(f"Помилка всередині вебхука: {e}")
+    return {"status": "ok"}
+
+@app.get("/")
+async def root():
+    return {"status": "working", "info": "100 PHOTO Bot"}
+
+@app.on_event("startup")
+async def on_startup():
+    await init_db()
+    if BASE_URL:
+        logger.info("Оновлення вебхука v Telegram...")
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+            await bot.set_webhook(f"{BASE_URL}/webhook")
+            logger.info("Вебхук успішно перевстановлено!")
+        except Exception as e:
+            logger.error(f"Помилка встановлення вебхука: {e}")
