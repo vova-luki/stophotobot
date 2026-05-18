@@ -140,7 +140,7 @@ async def show_admin_stats(message: types.Message):
     )
     await message.answer(stats_text, parse_mode="Markdown")
 
-# 2. АВТО-ЗАПУСК: КОЛИ БОТА ДОДАЮТЬ В ГРУПУ (Дужки закриті!)
+# 2. АВТО-ЗАПУСК: КОЛИ БОТА ДОДАЮТЬ В ГРУПУ
 @dp.message(F.new_chat_members)
 async def on_bot_join(message: types.Message):
     bot_added = any(member.id == bot.id for member in message.new_chat_members)
@@ -149,7 +149,7 @@ async def on_bot_join(message: types.Message):
         await log_user_to_db(message.from_user.id)
         await message.answer(RULES_TEXT, parse_mode="HTML", reply_markup=get_main_keyboard(), disable_web_page_preview=True)
 
-# 3. ЗАПУСК ПО КОМАНДАХ В ЧАТІ (Дужки закриті!)
+# 3. ЗАПУСК ПО КОМАНДАХ В ЧАТІ
 @dp.message(F.text.in_({"/start", "/game", "/play", "Старт", "game", "play", "Start"}))
 async def on_command_start(message: types.Message):
     await log_chat_to_db(message.chat.id)
@@ -195,82 +195,4 @@ async def show_payment_post(chat_id: int):
         "Pro-версія гри:\n"
         "- безлімітна к-сть гравців\n"
         "- гра до 100 раундів назавжди\n"
-        "- у всіх чатах Pro-гравця"
-    )
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="[ КУПИТИ PRO-ВЕРСІЮ ]", callback_data="buy_pro")],
-        [InlineKeyboardButton(text="[ ПРОДОВЖИТИ ГРУ УДВОХ ]", callback_data="start_free")]
-    ])
-    await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
-
-# 5. ОБРОБНИК ФОТОГРАФІЙ (ІГРОВИЙ ЦИКЛ)
-@dp.message(F.photo)
-async def handle_game_photo(message: types.Message):
-    chat_id = message.chat.id
-    if chat_id not in GAMES_DATA:
-        return
-        
-    game = GAMES_DATA[chat_id]
-    user_name = get_user_name(message.from_user)
-    
-    await log_user_to_db(message.from_user.id)
-    
-    chat_member_count = await bot.get_chat_member_count(chat_id)
-    if game["status"] == "free" and chat_member_count > 2:
-        await show_payment_post(chat_id)
-        return
-
-    current_round = game["round"]
-    max_rounds = 10
-    
-    game["scores"][user_name] = game["scores"].get(user_name, 0) + 1
-    game["history"].append((user_name, current_round))
-    
-    if current_round >= max_rounds:
-        winner = max(game["scores"], key=game["scores"].get)
-        scores_text = "\n".join([f"{u}: {s}" for u, s in game["scores"].items()])
-        fin_text = f"Переможець: {winner}\n\nРахунок:\n{scores_text}\n\nНе забудь про свій приз!"
-        
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="[ ОБНУЛИТИ РАУНД 10 ]", callback_data="cancel_last")],
-            [InlineKeyboardButton(text="[ НОВА ГРА ДО 10 ]", callback_data="start_free")],
-            [InlineKeyboardButton(text="[ НОВА ГРА ДО 100 ]", callback_data="trigger_pay")],
-            [InlineKeyboardButton(text="[ ДОДАТИ ГРАВЦІВ ]", callback_data="trigger_pay")]
-        ])
-        await message.answer(fin_text, reply_markup=kb)
-        GAMES_DATA.pop(chat_id, None)
-        return
-
-    game["round"] += 1
-    next_round = game["round"]
-    scores_text = "\n".join([f"{u}: {s}" for u, s in game["scores"].items()])
-    task_text = f"Завдання: {next_round}\n\n{scores_text}\n\nЗнайди і сфотографуй число {next_round}."
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"[ ОБНУЛИТИ РАУНД {next_round-1} ]", callback_data="cancel_last")],
-        [InlineKeyboardButton(text="[ НОВА ГРА ДО 10 ]", callback_data="start_free")],
-        [InlineKeyboardButton(text="[ НОВА ГРА ДО 100 ]", callback_data="trigger_pay")],
-        [InlineKeyboardButton(text="[ ДОДАТИ ГРАВЦІВ ]", callback_data="trigger_pay")]
-    ])
-    await message.answer(task_text, reply_markup=kb)
-
-# 6. РЕАЛІЗАЦІЯ КНОПКИ [ ОБНУЛИТИ РАУНД ]
-@dp.callback_query(F.data == "cancel_last")
-async def cancel_last_round(callback: types.CallbackQuery):
-    chat_id = callback.message.chat.id
-    if chat_id not in GAMES_DATA or not GAMES_DATA[chat_id]["history"]:
-        await callback.answer("Немає раундів для скасування!", show_alert=True)
-        return
-        
-    game = GAMES_DATA[chat_id]
-    last_user, last_round = game["history"].pop()
-    if last_user in game["scores"] and game["scores"][last_user] > 0:
-        game["scores"][last_user] -= 1
-        
-    game["round"] = last_round
-    scores_text = "\n".join([f"{u}: {s}" for u, s in game["scores"].items()])
-    task_text = f"Раунд скасовано!\n\nЗавдання: {last_round}\n\n{scores_text}\n\nЗнайди і сфотографуй число {last_round}."
-    await callback.message.answer(task_text)
-    await callback.answer("Останній раунд скасовано!")
-
-# ІГНОРУВАННЯ
+        "- у всіх чатах Pro-гра
