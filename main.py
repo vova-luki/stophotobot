@@ -2,6 +2,7 @@ import os
 import logging
 import asyncio
 import threading
+import json
 from http.server import SimpleHTTPRequestHandler, HTTPServer
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -10,6 +11,7 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
+    ChatMemberHandler,
     filters,
     ContextTypes
 )
@@ -29,16 +31,15 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 PORT = int(os.getenv("PORT", 10000))
 ADMIN_ID = 453664724  # Твій Telegram ID для команди /stat
 
-# Прямі лінки на картинки (вони тепер роздаються цим же сервером)
+# Прямі лінки на картинки
 PHOTO_RULES = "https://stophotobot.onrender.com/1.png"
 PHOTO_START = "https://stophotobot.onrender.com/2.png"
 PHOTO_END = "https://stophotobot.onrender.com/3.png"
 
-# --- ФЕЙКОВИЙ ВЕБ-СЕРВЕР ДЛЯ RENDER ---
+# --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
 def run_http_server():
     class QuietHandler(SimpleHTTPRequestHandler):
         def log_message(self, format, *args):
-            # Вимикаємо зайві логи запитів у консолі
             return
 
     server_address = ('', PORT)
@@ -78,7 +79,6 @@ def db_get_game(chat_id):
 
 # Збереження/Оновлення стану гри
 def db_save_game(chat_id, state, max_rounds, current_round, scores, history):
-    import json
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
@@ -96,32 +96,27 @@ def db_save_game(chat_id, state, max_rounds, current_round, scores, history):
 
 # Функція генерації тексту рахунку
 def render_scores(scores_dict, is_round_one=False):
-    if is_round_one and not scores_dict:
-        return "@user1: 0\n@user2: 0"
+    if is_round_one:
+        return "player 1: 0\n\nplayer 2: 0"
     if not scores_dict:
         return "Немає активних гравців"
     
     sorted_scores = sorted(scores_dict.items(), key=lambda x: x[1], reverse=True)
-    return "\n".join([f"{user}: {score}" for user, score in sorted_scores])
+    return "\n\n".join([f"{user}: {score}" for user, score in sorted_scores])
 
-# Команда /start або /play
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    chat = update.effective_chat
-    
-    db_upsert_user(user.id, user.username, user.full_name)
-    
+# Спільна функція відправки головного меню правил
+async def send_welcome_rules(chat):
     rules_text = (
         "Вітаємо у грі <a href='https://t.me/stophotobot'>100 PHOTO</a>!\n\n"
         "Правила гри:\n\n"
-        "1. Завдання гравців – фотографувати числа (1, 2, 3) і надсилати у цей чат.\n"
-        "2. Безоплатна гра триває 10 раундів, платна – 100 раундів. 1 раунд = 1 photo.\n"
+        "1. Завдання гравців – фотографувати числа (1, 2, 3) і надсилати у цей чат.\n\n"
+        "2. Безоплатна гра триває 10 раундів, платна – 100 раундів. 1 раунд = 1 фото.\n\n"
         "За кожне фото гравець отримує 1 бал.\n\n"
         "3. Числа не можна створювати (викладати предметами) або писати самому. "
         "Лише фотографувати їх вдома, на вулиці тощо.\n\n"
         "4. Не можна повторювати двічі числа з однієї локації (номери сторінок у книзі, кнопки в ліфті тощо). "
         "Локації мають бути різними.\n\n"
-        "5. Якщо надіслане foto не відповідає правилам, це фото можна відмінити і почати раунд заново.\n"
+        "5. Якщо надіслане фото не відповідає правилам, це фото можна відмінити і почати раунд заново.\n\n"
         "Щоб перезапустити бота, напишіть в чат команду /start або /play.\n\n"
         "За бажанням, придумайте приз переможцю.\n\n"
         "Натхнення!"
@@ -145,6 +140,20 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Помилка відправки фото правил: {e}")
         await chat.send_message(text=rules_text, parse_mode="HTML", reply_markup=reply_markup)
 
+# Команда /start або /play
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    chat = update.effective_chat
+    db_upsert_user(user.id, user.username, user.full_name)
+    await send_welcome_rules(chat)
+
+# Автоматична реакція на додавання бота в групу
+async def track_chats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    result = update.my_chat_member
+    if result.new_chat_member.status in ["member", "administrator"]:
+        logger.info(f"Бота додано в чат: {update.effective_chat.title} ({update.effective_chat.id})")
+        await send_welcome_rules(update.effective_chat)
+
 # Обробка натискань на кнопки
 async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -161,13 +170,13 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         caption = (
             "Завдання: 1\n\n"
-            "Рахунок\n"
+            "Рахунок\n\n"
             f"{render_scores({}, is_round_one=True)}\n\n"
             "Знайди і сфотографуй число 1."
         )
+        # Для першого раунду прибираємо кнопку обнулення раунду взагалі
         keyboard = [
-            [InlineKeyboardButton("[ ОБНУЛИТИ РАУНД 0 ]", callback_data="void_round")],
-            [InlineKeyboardButton("[ НОВА ГРА ДО 10 ]", callback_data="new_game_10")],
+            [InlineKeyboardButton("[ ПОЧАТИ ЗАНОВО ]", callback_data="new_game_10")],
             [InlineKeyboardButton("[ НОВА ГРА ДО 100 ]", callback_data="buy_pro")],
             [InlineKeyboardButton("[ ДОДАТИ ГРАВЦІВ ]", callback_data="add_players")]
         ]
@@ -178,9 +187,9 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     elif data == "buy_pro":
         caption = (
-            "Pro-версія гри:\n"
-            "- до 10 гравців\n"
-            "- до 100 раундів назавжди\n"
+            "Pro-версія гри:\n\n"
+            "- до 10 гравців\n\n"
+            "- до 100 раундів назавжди\n\n"
             "- у всіх чатах Pro-гравця"
         )
         keyboard = [
@@ -200,9 +209,9 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         display_name = f"@{user.username}" if user.username else user.first_name
         caption = (
-            "Дякую, оплата є!\n"
-            f"– {display_name} тепер Pro\n"
-            "– відкрито 100 раундів\n"
+            "Дякую, оплата є!\n\n"
+            f"– {display_name} тепер Pro\n\n"
+            "– відкрито 100 раундів\n\n"
             "– відкрито 10 гравців"
         )
         keyboard = [[InlineKeyboardButton("[ НОВА ГРА ]", callback_data="new_game_pro")]]
@@ -212,12 +221,11 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db_save_game(chat_id, "RUNNING_PRO", 100, 1, {}, [])
         caption = (
             "Завдання: 1\n\n"
-            "Рахунок\n"
+            "Рахунок\n\n"
             f"{render_scores({}, is_round_one=True)}\n\n"
             "Знайди і сфотографуй число 1."
         )
         keyboard = [
-            [InlineKeyboardButton("[ ОБНУЛИТИ РАУНД 0 ]", callback_data="void_round")],
             [InlineKeyboardButton("[ ПОЧАТИ ЗАНОВО ]", callback_data="new_game_pro")]
         ]
         try:
@@ -269,7 +277,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     scores = game['scores'] or {}
     history = game['history'] or []
     
-    user_display = user.first_name if user.first_name else f"@{user.username}"
+    user_display = f"@{user.username}" if user.username else user.first_name
     
     scores[user_display] = scores.get(user_display, 0) + 1
     history.append({'round': current_round, 'user': user_display, 'time': datetime.now().isoformat()})
@@ -278,7 +286,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         winner = max(scores, key=scores.get) if scores else user_display
         caption = (
             f"Переможець: {winner}\n\n"
-            "Рахунок:\n"
+            "Рахунок:\n\n"
             f"{render_scores(scores)}\n\n"
             "Не забудь про свій приз!"
         )
@@ -304,18 +312,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         next_round = current_round + 1
         db_save_game(chat_id, state, max_rounds, next_round, scores, history)
         
+        # Пост для завдань з 2 по 100 відповідно до ТЗ
         caption = (
             f"Завдання: {next_round}\n\n"
-            "Рахунок:\n"
             f"{render_scores(scores)}\n\n"
             f"Знайди і сфотографуй число {next_round}."
         )
         if "FREE" in state:
             keyboard = [
                 [InlineKeyboardButton(f"[ ОБНУЛИТИ РАУНД {next_round-1} ]", callback_data="void_round")],
-                [InlineKeyboardButton("[ НОВА ГРА ДО 10 ]", callback_data="new_game_10")],
-                [InlineKeyboardButton("[ НОВА ГРА ДО 100 ]", callback_data="buy_pro")],
-                [InlineKeyboardButton("[ ДОДАТИ ГРАВЦІВ ]", callback_data="add_players")]
+                [InlineKeyboardButton("[ ПОЧАТИ ЗАНОВО ]", callback_data="new_game_10")]
             ]
         else:
             keyboard = [
@@ -346,9 +352,9 @@ async def stat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 stat_text = (
                     "📊 СТАТИСТИКА БОТА\n\n"
-                    f"Всього чатів: {total_chats}\n"
-                    f"Всього користувачів: {total_users}\n"
-                    f"Безкоштовних користувачів: {free_users}\n"
+                    f"Всього чатів: {total_chats}\n\n"
+                    f"Всього користувачів: {total_users}\n\n"
+                    f"Безкоштовних користувачів: {free_users}\n\n"
                     f"PRO користувачів: {pro_users}\n"
                 )
                 await update.message.reply_text(stat_text)
@@ -356,17 +362,20 @@ async def stat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Помилка збору статистики: {e}")
 
 def main():
-    # Запускаємо HTTP-сервер в окремому потоці, щоб він не заважав боту
+    # Запуск фонового веб-сервера для статусів Render
     threading.Thread(target=run_http_server, daemon=True).start()
 
-    # Запуск Telegram бота
+    # Створення додатку
     application = Application.builder().token(TOKEN).build()
     
+    # Реєстрація обробників подій
     application.add_handler(CommandHandler(["start", "play"], start_command))
     application.add_handler(CommandHandler("stat", stat_command))
+    application.add_handler(ChatMemberHandler(track_chats, ChatMemberHandler.MY_CHAT_MEMBER))
     application.add_handler(CallbackQueryHandler(button_click))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     
+    # Запуск довгого опитування (polling)
     application.run_polling()
 
 if __name__ == '__main__':
