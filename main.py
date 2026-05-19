@@ -12,8 +12,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Змінні оточення
-TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN") or "8115804787:AAHuPshoaLVtAbblD9pi09qb5CCCXgC7xI4"
+# Змінні оточення (Беремо суворо з налаштувань Render для безпеки)
+TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN")
+if not TOKEN:
+    raise ValueError("Помилка: TELEGRAM_TOKEN або BOT_TOKEN не знайдені в змінних оточення Render!")
+
 BASE_URL = os.getenv("BASE_URL") or "https://stophotobot-1.onrender.com"
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
@@ -37,7 +40,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Якщо це приватний чат з ботом
     if chat.type == "private":
-        # Звичайному юзеру показуємо заглушку, адміну просто не даємо ігрових кнопок
         if user.id != ADMIN_ID:
             await update.message.reply_text(PRIVATE_WELCOME_TEXT)
         else:
@@ -45,7 +47,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ЛОГІКА ДЛЯ ГРУПОВИХ ЧАТІВ
-    # (Тут надсилається пост ПРАВИЛА, картинка 1 тощо. Поки що базова заглушка для тесту чатів)
     keyboard = [
         [InlineKeyboardButton("НОВА ГРА ДО 10", callback_data="new_game_10")],
         [InlineKeyboardButton("КУПИТИ PRO-ВЕРСІЮ", callback_data="buy_pro")]
@@ -64,7 +65,6 @@ async def stat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Сувора перевірка: тільки приватний чат і тільки твій ID
     if chat.type == "private" and user.id == ADMIN_ID:
-        # Шаблон статистики (в майбутньому додамо запити до Supabase)
         stat_text = (
             "📊 **СТАТИСТИКА ПРОЄКТУ**\n\n"
             "ЗА ВЕСЬ ЧАС:\n"
@@ -76,7 +76,6 @@ async def stat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "- всі чати: +0\n"
             "- всі юзери: +0"
         )
-        # Надсилаємо суворо в поточний приватний чат адміна
         await context.bot.send_message(chat_id=chat.id, text=stat_text, parse_mode="Markdown")
     else:
         # Для всіх інших або якщо викликано в групі — повний ігнор
@@ -97,7 +96,7 @@ async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Логіка кнопок працює строго в межах того chat.id, де кнопку натиснули
     if query.data == "new_game_10":
-        await context.bot.send_message(chat_id=chat.id, text=f"Гра активована користувачем @{user.username or user.first_name}. Завдання 1! Чекаю фото.")
+        await context.bot.send_message(chat_id=chat.id, text=f"Гра активована користувачем @{user.username or user.first_name}. Завдання 1! Чекаю photo.")
     elif query.data == "buy_pro":
         await context.bot.send_message(chat_id=chat.id, text="Посилання на оплату (99 грн): https://send.monobank.ua/...")
 
@@ -126,4 +125,33 @@ async def lifespan(app: FastAPI):
     """Керування стартом та зупинкою додатка згідно з правилами Render"""
     logger.info("Ініціалізація Telegram бота...")
     await telegram_app.initialize()
-    await
+    await telegram_app.start()
+    
+    logger.info(f"Встановлюємо вебхук на: {WEBHOOK_URL}")
+    await bot.set_webhook(url=WEBHOOK_URL, drop_pending_updates=True)
+    
+    yield
+    
+    logger.info("Зупинка Telegram бота...")
+    await bot.delete_webhook()
+    await telegram_app.stop()
+    await telegram_app.shutdown()
+
+app = FastAPI(lifespan=lifespan)
+
+@app.post(WEBHOOK_PATH)
+async def webhook_endpoint(request: Request):
+    """Ендпоінт для отримання апдейтів від Telegram через вебхук"""
+    try:
+        json_data = await request.json()
+        update = Update.de_json(json_data, bot)
+        await telegram_app.process_update(update)
+        return Response(status_code=200)
+    except Exception as e:
+        logger.error(f"Помилка при обробці вебхука: {e}")
+        return Response(status_code=500)
+
+@app.get("/")
+async def root_endpoint():
+    """Ендпоінт для перевірки працездатності сервісу (Render)"""
+    return {"status": "working", "mode": "webhook", "bot": "stophotobot"}
