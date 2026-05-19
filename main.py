@@ -1,157 +1,161 @@
 import os
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, Response
-from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from fastapi import FastAPI, Request
+from telegram import Bot, Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from supabase import create_client
 
 # Налаштування логування
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Змінні оточення (Беремо суворо з налаштувань Render для безпеки)
-TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN")
-if not TOKEN:
-    raise ValueError("Помилка: TELEGRAM_TOKEN або BOT_TOKEN не знайдені в змінних оточення Render!")
+# Конфігурація з Render
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+BASE_URL = os.getenv("BASE_URL")
+DB_URL = os.getenv("DATABASE_URL")
+# Примітка: Supabase key беремо з оточення
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-BASE_URL = os.getenv("BASE_URL") or "https://stophotobot-1.onrender.com"
-WEBHOOK_PATH = "/webhook"
-WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
+# Ініціалізація Supabase (використовуємо стандартні методи)
+supabase = create_client(os.getenv("SUPABASE_URL"), SUPABASE_KEY)
 
-# Дані адміністратора
-ADMIN_ID = 124303561
-
-# Ініціалізація бота та додатку python-telegram-bot
+# Створення об'єкта бота для вебхука
 bot = Bot(token=TOKEN)
-telegram_app = Application.builder().token(TOKEN).build()
-
-# Текстова заглушка для звичайних користувачів у приваті
-PRIVATE_WELCOME_TEXT = "Привіт! Додай мене в груповий чат, щоб почати гру 100 PHOTO! Цей бот створений для роботи у групах."
-
-# --- ОБРОБНИКИ КОМАНД ТА ПОДІЙ ---
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обробка команди /start або /play"""
-    chat = update.effective_chat
-    user = update.effective_user
-    
-    # Якщо це приватний чат з ботом
-    if chat.type == "private":
-        if user.id != ADMIN_ID:
-            await update.message.reply_text(PRIVATE_WELCOME_TEXT)
-        else:
-            await update.message.reply_text("Привіт, Адмін! Для перегляду метрик використовуй команду /stat")
-        return
-
-    # ЛОГІКА ДЛЯ ГРУПОВИХ ЧАТІВ
-    keyboard = [
-        [InlineKeyboardButton("НОВА ГРА ДО 10", callback_data="new_game_10")],
-        [InlineKeyboardButton("КУПИТИ PRO-ВЕРСІЮ", callback_data="buy_pro")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await context.bot.send_message(
-        chat_id=chat.id, 
-        text=f"Бот успішно запущений у групі: {chat.title}\n\n[Пост ПРАВИЛА]", 
-        reply_markup=reply_markup
-    )
-
-async def stat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /stat виключно для адміна і тільки в приватних повідомленнях"""
-    chat = update.effective_chat
-    user = update.effective_user
-
-    # Сувора перевірка: тільки приватний чат і тільки твій ID
-    if chat.type == "private" and user.id == ADMIN_ID:
-        stat_text = (
-            "📊 **СТАТИСТИКА ПРОЄКТУ**\n\n"
-            "ЗА ВЕСЬ ЧАС:\n"
-            "- всі чати: 0\n"
-            "- всі юзери: 0\n"
-            "- free-юзери: 0\n"
-            "- pro-юзери: 0\n\n"
-            "ПРИРІСТ ЗА 24 ГОД:\n"
-            "- всі чати: +0\n"
-            "- всі юзери: +0"
-        )
-        await context.bot.send_message(chat_id=chat.id, text=stat_text, parse_mode="Markdown")
-    else:
-        # Для всіх інших або якщо викликано в групі — повний ігнор
-        return
-
-async def button_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обробка натискань на кнопки"""
-    query = update.callback_query
-    chat = update.effective_chat
-    user = update.effective_user
-
-    # Безпека: повністю ігноруємо будь-які ігрові кнопки, якщо вони натиснуті у приваті
-    if chat.type == "private":
-        await query.answer(text="Гра доступна тільки в групах!", show_alert=True)
-        return
-
-    await query.answer()
-    
-    # Логіка кнопок працює строго в межах того chat.id, де кнопку натиснули
-    if query.data == "new_game_10":
-        await context.bot.send_message(chat_id=chat.id, text=f"Гра активована користувачем @{user.username or user.first_name}. Завдання 1! Чекаю photo.")
-    elif query.data == "buy_pro":
-        await context.bot.send_message(chat_id=chat.id, text="Посилання на оплату (99 грн): https://send.monobank.ua/...")
-
-async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обробка надісланих фотографій у групах"""
-    chat = update.effective_chat
-    
-    # Ігноруємо фото у приватних повідомленнях
-    if chat.type == "private":
-        return
-
-    # Логіка гри: фіксуємо фото в конкретному чаті
-    await update.message.reply_text(f"Фото зафіксовано в чаті {chat.id}! +1 бал гравцю.")
-
-# Реєстрація обробників у додатку Telegram
-telegram_app.add_handler(CommandHandler("start", start_command))
-telegram_app.add_handler(CommandHandler("play", start_command))
-telegram_app.add_handler(CommandHandler("stat", stat_command))
-telegram_app.add_handler(CallbackQueryHandler(button_click))
-telegram_app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
-
-# --- ІНІЦІАЛІЗАЦІЯ FASTAPI ТА LIFESPAN ---
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Керування стартом та зупинкою додатка згідно з правилами Render"""
-    logger.info("Ініціалізація Telegram бота...")
-    await telegram_app.initialize()
-    await telegram_app.start()
-    
-    logger.info(f"Встановлюємо вебхук на: {WEBHOOK_URL}")
-    await bot.set_webhook(url=WEBHOOK_URL, drop_pending_updates=True)
-    
+    # Реєстрація вебхука при старті
+    webhook_url = f"{BASE_URL}/webhook"
+    await bot.set_webhook(webhook_url)
+    logger.info(f"Webhook set to {webhook_url}")
     yield
-    
-    logger.info("Зупинка Telegram бота...")
+    # Видалення вебхука при зупинці
     await bot.delete_webhook()
-    await telegram_app.stop()
-    await telegram_app.shutdown()
+    logger.info("Webhook deleted")
 
 app = FastAPI(lifespan=lifespan)
 
-@app.post(WEBHOOK_PATH)
-async def webhook_endpoint(request: Request):
-    """Ендпоінт для отримання апдейтів від Telegram через вебхук"""
-    try:
-        json_data = await request.json()
-        update = Update.de_json(json_data, bot)
-        await telegram_app.process_update(update)
-        return Response(status_code=200)
-    except Exception as e:
-        logger.error(f"Помилка при обробці вебхука: {e}")
-        return Response(status_code=500)
+from telegram import Update
 
-@app.get("/")
-async def root_endpoint():
-    """Ендпоінт для перевірки працездатності сервісу (Render)"""
-    return {"status": "working", "mode": "webhook", "bot": "stophotobot"}
+@app.post("/webhook")
+async def webhook(request: Request):
+    """Ендпоінт для отримання оновлень від Telegram"""
+    update = Update.de_json(await request.json(), bot)
+    # Передаємо оновлення в Application, яку ми налаштуємо далі
+    await application.process_update(update)
+    return {"status": "ok"}
+
+from telegram.ext import ApplicationBuilder
+
+# Створення об'єкта application
+application = ApplicationBuilder().token(TOKEN).build()
+
+async def start_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обробник команд /start та /play"""
+    # Тут буде логіка перевірки чату та ініціації стану гри
+    await update.message.reply_text("Гра 100 PHOTO запущена!")
+
+# Реєстрація хендлерів
+application.add_handler(CommandHandler(["start", "play"], start_game))
+
+async def check_chat_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Мідлвар для фільтрації контексту"""
+    chat = update.effective_chat
+    user = update.effective_user
+    
+    # Ігноруємо стікери та текстові повідомлення, якщо гра не в стані введення
+    if update.message and (update.message.sticker or (update.message.text and not update.message.text.startswith('/'))):
+        return
+        
+    # Блокування ігор в приваті
+    if chat.type == 'private' and user.id != 124303561:
+        await update.message.reply_text("Бот призначений тільки для гри в групах. Додайте мене в чат!")
+        return
+
+# Додаємо фільтр до нашого application
+application.add_handler(MessageHandler(filters.ALL, check_chat_type), group=-1)
+
+async def check_and_send_post(chat_id: int, bot: Bot):
+    """Перевірка кількості гравців і відправка відповідного посту"""
+    count = await bot.get_chat_member_count(chat_id)
+    # Реальний лічильник гравців (без бота) = count - 1
+    players_count = count - 1
+    
+    # Логіка визначення статусу PRO (тут має бути запит до БД)
+    is_pro_chat = False 
+    
+    if is_pro_chat:
+        if players_count == 1:
+            await bot.send_message(chat_id, "ПОСТ '1 ЛЮДИНА В ГРУПІ'")
+        elif 2 <= players_count <= 10:
+            await bot.send_message(chat_id, "ПОСТ 'ПРАВИЛА'")
+        else:
+            await bot.send_message(chat_id, "ПОСТ '11 ЛЮДЕЙ В ГРУПІ'")
+    else:
+        if players_count == 1:
+            await bot.send_message(chat_id, "ПОСТ '1 ЛЮДИНА В ГРУПІ'")
+        elif players_count == 2:
+            await bot.send_message(chat_id, "ПОСТ 'ПРАВИЛА'")
+        else:
+            await bot.send_message(chat_id, "ПОСТ '3 ЛЮДИНИ В ГРУПІ'")
+
+# Приклад виклику в команді /start
+async def start_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await check_and_send_post(update.effective_chat.id, context.bot)
+
+async def is_user_pro(user_id: int) -> bool:
+    """Перевірка статусу Pro в Supabase"""
+    try:
+        response = supabase.table("users").select("is_pro").eq("user_id", user_id).single().execute()
+        return response.data.get("is_pro", False) if response.data else False
+    except Exception as e:
+        logger.error(f"Error checking Pro status: {e}")
+        return False
+
+# Тепер оновимо частину перевірки в check_and_send_post
+async def check_and_send_post(chat_id: int, bot: Bot, user_id: int):
+    count = await bot.get_chat_member_count(chat_id)
+    players_count = count - 1
+    
+    # Виклик функції перевірки
+    is_pro_chat = await is_user_pro(user_id) 
+    
+    # ... (далі ваша логіка з попереднього блоку з використанням is_pro_chat)
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обробка отриманого фото"""
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+    
+    # Тут буде логіка:
+    # 1. Запис фото в БД (як відповіді на раунд)
+    # 2. Оновлення рахунку гравця в БД
+    # 3. Перевірка, чи це останній раунд (10 або 100)
+    # 4. Відправка повідомлення з наступним завданням
+    
+    await update.message.reply_text(f"Фото отримано! Раунд оновлено для {user.first_name}")
+
+# Додаємо хендлер для фото
+application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+
+import asyncio
+
+async def get_stats_data():
+    """Асинхронний збір статистики з БД"""
+    # Тут будуть ваші запити типу:
+    # supabase.table("users").select("*", count='exact').execute()
+    # Використовуйте asyncio.gather для паралельності
+    return "Статистика за весь час:\n- всі чати: 0\n- всі юзери: 0..."
+
+async def stat_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обробник команди /stat"""
+    if update.effective_user.id != 124303561:
+        return
+    
+    stats = await get_stats_data()
+    await update.message.reply_text(stats)
+
+# Додаємо команду
+application.add_handler(CommandHandler("stat", stat_command))
+
