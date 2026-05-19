@@ -76,7 +76,7 @@ async def check_chat_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Додаємо фільтр до нашого application
 application.add_handler(MessageHandler(filters.ALL, check_chat_type), group=-1)
 
-async def check_and_send_post(chat_id: int, bot: Bot):
+async def check_and_send_post(chat_id: int, bot: Bot, user_id: int):
     """Перевірка кількості гравців і відправка відповідного посту"""
     count = await bot.get_chat_member_count(chat_id)
     # Реальний лічильник гравців (без бота) = count - 1
@@ -102,7 +102,7 @@ async def check_and_send_post(chat_id: int, bot: Bot):
 
 # Приклад виклику в команді /start
 async def start_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await check_and_send_post(update.effective_chat.id, context.bot)
+    await check_and_send_post(update.effective_chat.id, context.bot, update.effective_user.id)
 
 async def is_user_pro(user_id: int) -> bool:
     """Перевірка статусу Pro в Supabase"""
