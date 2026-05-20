@@ -1,6 +1,7 @@
 import os
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import Update, ChatMemberUpdated
@@ -16,21 +17,27 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-app = FastAPI()
 
 db_pool = None
 
-@app.on_event("startup")
-async def startup():
+# Сучасний менеджер контексту Lifespan для FastAPI замість @app.on_event
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     global db_pool
+    # Створюємо пул підключень до Supabase при старті додатка
     db_pool = await asyncpg.create_pool(DATABASE_URL)
     webhook_url = f"{BASE_URL}/webhook"
     await bot.set_webhook(url=webhook_url)
-
-@app.on_event("shutdown")
-async def shutdown():
-    await db_pool.close()
+    
+    yield  # Тут додаток працює і приймає запити
+    
+    # Логіка при зупинці додатка
+    if db_pool:
+        await db_pool.close()
     await bot.delete_webhook()
+
+# Передаємо lifespan в ініціалізацію додатка
+app = FastAPI(lifespan=lifespan)
 
 @app.post("/webhook")
 async def webhook(request: Request):
@@ -39,8 +46,10 @@ async def webhook(request: Request):
     await dp.feed_update(bot, update)
     return {"status": "ok"}
 
-# Безпечна перевірка PRO статусу без припущень щодо зайвих колонок
+# Безпечна перевірка PRO статусу
 async def check_pro_status(chat_id: int = None, user_id: int = None) -> bool:
+    if not db_pool:
+        return False
     async with db_pool.acquire() as conn:
         if user_id:
             row = await conn.fetchrow("SELECT is_pro FROM users WHERE user_id = $1", user_id)
@@ -98,7 +107,7 @@ async def send_welcome_rules(chat_id: int):
             "Лише фотографувати їх вдома, на вулиці тощо.\n\n"
             "4. Не можна повторювати двічі числа з однієї локації (номери сторінок у книзі, кнопки в ліфті тощо).\n"
             "Локації мають бути різними.\n\n"
-            "5. Якщо надіслане photo не відповідає правилам, це фото можна відмінити і почати раунд заново.\n"
+            "5. Якщо надіслане photo не відповідає правилам, це photo можна відмінити і почати раунд заново.\n"
             "Щоб перезапустити бота, напишіть в чат команду /start або /play.\n\n"
             "За бажанням, придумайте приз переможцю.\n\n"
             "Натхнення!"
@@ -208,7 +217,7 @@ async def handle_photo(message: types.Message):
 
         await message.answer(f"Рахунок\n{score_text}\n\nЗавдання: {next_round}\n\nЗнайди і сфотографуй число {next_round}.", reply_markup=kb)
 
-# Надійне відслідковування додавання бота в групу через aiogram 3.x фільтр
+# Надійне відслідковування додавання бота в групу
 @dp.my_chat_member(ChatMemberUpdatedFilter(chat_member_transition=JOIN_TRANSITION))
 async def on_bot_join(event: ChatMemberUpdated):
     await send_welcome_rules(event.chat.id)
