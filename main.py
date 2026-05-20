@@ -1,8 +1,12 @@
 import os
 import asyncio
+import json
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import Update
+from aiogram.types import Update, ChatMemberUpdated
+from aiogram.filters import Command
+from aiogram.filters.chat_member_updated import ChatMemberUpdatedFilter, JOIN_TRANSITION
+from aiogram.exceptions import TelegramAPIError
 import asyncpg
 
 # Ініціалізація інструментів
@@ -48,7 +52,7 @@ async def check_pro_status(chat_id: int = None, user_id: int = None) -> bool:
                 return True
     return False
 
-# Функція надсилання правил та перевірки лімітів
+# Безпечна функція надсилання правил та перевірки лімітів (із захистом від падіння 500)
 async def send_welcome_rules(chat_id: int):
     try:
         count = await bot.get_chat_member_count(chat_id)
@@ -58,60 +62,65 @@ async def send_welcome_rules(chat_id: int):
 
     is_pro = await check_pro_status(chat_id=chat_id)
 
-    if not is_pro:
-        if count_members == 1:
-            text = "Щоб грати, додайте в групу другого гравця.\nЩоб перезапустити бота, напишіть в чат команду /start або /play."
+    try:
+        if not is_pro:
+            if count_members == 1:
+                text = "Щоб грати, додайте в групу другого гравця.\nЩоб перезапустити бота, напишіть в чат команду /start або /play."
+                keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+                    [types.InlineKeyboardButton(text="НОВА ГРА ДО 10", callback_data="start_game_10")]
+                ])
+                await bot.send_message(chat_id, text, reply_markup=keyboard)
+                return False
+
+            elif count_members >= 3:
+                text = "Щоб грати втрьох і більше, хоча б 1 гравець має бути Pro.\n\nPro-версія гри:\n- до 10 гравців\n- до 100 раундів назавжди\n- у всіх чатах Pro-глявця"
+                keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+                    [types.InlineKeyboardButton(text="КУПИТИ PRO-ВЕРСІЮ", callback_data="buy_pro")]
+                ])
+                await bot.send_message(chat_id, text, reply_markup=keyboard)
+                return False
+
+        if count_members > 10:
+            text = "На жаль, грати може максимум 10 гравців.\nЩоб перезапустити бота, напишіть в чат команду /start або /play."
             keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
-                [types.InlineKeyboardButton(text="НОВА ГРА ДО 10", callback_data="start_game_10")]
+                [types.InlineKeyboardButton(text="НАС ВЖЕ 10", callback_data="already_10")]
             ])
             await bot.send_message(chat_id, text, reply_markup=keyboard)
             return False
 
-        elif count_members >= 3:
-            text = "Щоб грати втрьох і більше, хоча б 1 гравець має бути Pro.\n\nPro-версія гри:\n- до 10 гравців\n- до 100 раундів назавжди\n- у всіх чатах Pro-глявця"
-            keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
-                [types.InlineKeyboardButton(text="КУПИТИ PRO-ВЕРСІЮ", callback_data="buy_pro")]
-            ])
-            await bot.send_message(chat_id, text, reply_markup=keyboard)
-            return False
+        rules_text = (
+            "Вітаємо у грі <a href='https://t.me/stophotobot'>100 PHOTO</a>!\n\n"
+            "Правила гри:\n\n"
+            "1. Завдання гравців – фотографувати числа (1, 2, 3) і надсилати у цей чат.\n"
+            "2. Безоплатна гра триває 10 раундів, платна – 100 раундів. 1 раунд = 1 photo.\n"
+            "За кожне photo гравець отримує 1 бал.\n\n"
+            "3. Числа не можна створювати (викладати предметами) або писати самому.\n"
+            "Лише фотографувати їх вдома, на вулиці тощо.\n\n"
+            "4. Не можна повторювати двічі числа з однієї локації (номери сторінок у книзі, кнопки в ліфті тощо).\n"
+            "Локації мають бути різними.\n\n"
+            "5. Якщо надіслане фото не відповідає правилам, це фото можна відмінити і почати раунд заново.\n"
+            "Щоб перезапустити бота, напишіть в чат команду /start або /play.\n\n"
+            "За бажанням, придумайте приз переможцю.\n\n"
+            "Натхнення!"
+        )
 
-    if count_members > 10:
-        text = "На жаль, грати може максимум 10 гравців.\nЩоб перезапустити бота, напишіть в чат команду /start або /play."
-        keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="НАС ВЖЕ 10", callback_data="already_10")]
-        ])
-        await bot.send_message(chat_id, text, reply_markup=keyboard)
+        if is_pro:
+            keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+                [types.InlineKeyboardButton(text="НОВА ГРА", callback_data="start_game_100")]
+            ])
+        else:
+            keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+                [types.InlineKeyboardButton(text="НОВА ГРА ДО 10", callback_data="start_game_10")],
+                [types.InlineKeyboardButton(text="НОВА ГРА ДО 100", callback_data="buy_pro")],
+                [types.InlineKeyboardButton(text="ДОДАТИ ГРАВЦІВ", callback_data="add_players")]
+            ])
+
+        await bot.send_message(chat_id, rules_text, reply_markup=keyboard, parse_mode="HTML", disable_web_page_preview=True)
+        return True
+
+    except TelegramAPIError as e:
+        print(f"Помилка відправки повідомлення у чат {chat_id}: {e}")
         return False
-
-    rules_text = (
-        "Вітаємо у грі <a href='https://t.me/stophotobot'>100 PHOTO</a>!\n\n"
-        "Правила гри:\n\n"
-        "1. Завдання гравців – фотографувати числа (1, 2, 3) і надсилати у цей чат.\n"
-        "2. Безоплатна гра триває 10 раундів, платна – 100 раундів. 1 раунд = 1 photo.\n"
-        "За кожне фото гравець отримує 1 бал.\n\n"
-        "3. Числа не можна створювати (викладати предметами) або писати самому.\n"
-        "Лише фотографувати їх вдома, на вулиці тощо.\n\n"
-        "4. Не можна повторювати двічі числа з однієї локації (номери сторінок у книзі, кнопки в ліфті тощо).\n"
-        "Локації мають бути різними.\n\n"
-        "5. Якщо надіслане фото не відповідає правилам, це фото можна відмінити і почати раунд заново.\n"
-        "Щоб перезапустити бота, напишіть в чат команду /start або /play.\n\n"
-        "За бажанням, придумайте приз переможцю.\n\n"
-        "Натхнення!"
-    )
-
-    if is_pro:
-        keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="НОВА ГРА", callback_data="start_game_100")]
-        ])
-    else:
-        keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="НОВА ГРА ДО 10", callback_data="start_game_10")],
-            [types.InlineKeyboardButton(text="НОВА ГРА ДО 100", callback_data="buy_pro")],
-            [types.InlineKeyboardButton(text="ДОДАТИ ГРАВЦІВ", callback_data="add_players")]
-        ])
-
-    await bot.send_message(chat_id, rules_text, reply_markup=keyboard, parse_mode="HTML", disable_web_page_preview=True)
-    return True
 
 # Старт гри через кнопки
 @dp.callback_query(F.data.in_({"start_game_10", "start_game_100"}))
@@ -157,7 +166,6 @@ async def handle_photo(message: types.Message):
 
         current_round = game['current_round']
         max_rounds = game['max_rounds']
-        import json
         scores = json.loads(game['scores']) if isinstance(game['scores'], str) else dict(game['scores'])
 
         scores[username] = scores.get(username, 0) + 1
@@ -200,14 +208,13 @@ async def handle_photo(message: types.Message):
 
         await message.answer(f"Рахунок\n{score_text}\n\nЗавдання: {next_round}\n\nЗнайди і сфотографуй число {next_round}.", reply_markup=kb)
 
-# Обробка системних подій входу в групу та команд
-@dp.message(F.content_type == types.ContentType.NEW_CHAT_MEMBERS)
-async def on_bot_join(message: types.Message):
-    for member in message.new_chat_members:
-        if member.id == (await bot.get_me()).id:
-            await send_welcome_rules(message.chat.id)
+# Надійне відслідковування додавання бота в групу через aiogram 3.x фільтр
+@dp.my_chat_member(ChatMemberUpdatedFilter(member_change=JOIN_TRANSITION))
+async def on_bot_join(event: ChatMemberUpdated):
+    await send_welcome_rules(event.chat.id)
 
-@dp.message(F.text.in_({"/start", "/play", "/start@stophotobot", "/play@stophotobot"}))
+# Обробка команд /start та /play
+@dp.message(Command("start", "play"))
 async def cmd_start(message: types.Message):
     if message.chat.type in ["group", "supergroup"]:
         await send_welcome_rules(message.chat.id)
@@ -215,7 +222,7 @@ async def cmd_start(message: types.Message):
         await message.answer("Будь ласка, додайте бота в групу, щоб почати гру!")
 
 # Команда /stat для адміна
-@dp.message(F.text == "/stat")
+@dp.message(Command("stat"))
 async def cmd_stat(message: types.Message):
     stat_text = (
         "ЗА ВЕСЬ ЧАС:\n- всі чати: 2\n- всі юзери: 12\n- free-юзери: 11\n- pro-юзери: 1\n\n"
