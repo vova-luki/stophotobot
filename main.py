@@ -35,16 +35,15 @@ async def webhook(request: Request):
     await dp.feed_update(bot, update)
     return {"status": "ok"}
 
-# Безпечна перевірка PRO статусу без використання g.players
+# Безпечна перевірка PRO статусу без припущень щодо зайвих колонок
 async def check_pro_status(chat_id: int = None, user_id: int = None) -> bool:
     async with db_pool.acquire() as conn:
         if user_id:
             row = await conn.fetchrow("SELECT is_pro FROM users WHERE user_id = $1", user_id)
             if row and row['is_pro']:
                 return True
-        # Якщо перевірка по чату, дивимося чи активована pro-гра для цього chat_id
         if chat_id:
-            row = await conn.fetchrow("SELECT max_rounds FROM games WHERE chat_id = $1 AND is_active = true", chat_id)
+            row = await conn.fetchrow("SELECT max_rounds FROM games WHERE chat_id = $1", chat_id)
             if row and row['max_rounds'] == 100:
                 return True
     return False
@@ -69,7 +68,7 @@ async def send_welcome_rules(chat_id: int):
             return False
 
         elif count_members >= 3:
-            text = "Щоб грати втрьох і більше, хоча б 1 гравець має бути Pro.\n\nPro-версія гри:\n- до 10 гравців\n- до 100 раундів назавжди\n- у всіх чатах Pro-гравця"
+            text = "Щоб грати втрьох і більше, хоча б 1 гравець має бути Pro.\n\nPro-версія гри:\n- до 10 гравців\n- до 100 раундів назавжди\n- у всіх чатах Pro-глявця"
             keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
                 [types.InlineKeyboardButton(text="КУПИТИ PRO-ВЕРСІЮ", callback_data="buy_pro")]
             ])
@@ -122,21 +121,21 @@ async def start_game_handler(callback: types.CallbackQuery):
     
     async with db_pool.acquire() as conn:
         await conn.execute(
-            "INSERT INTO games (chat_id, current_round, max_rounds, scores, is_active) "
-            "VALUES ($1, 1, $2, '{}'::jsonb, true) "
-            "ON CONFLICT (chat_id) DO UPDATE SET current_round = 1, max_rounds = $2, scores = '{}'::jsonb, is_active = true",
+            "INSERT INTO games (chat_id, current_round, max_rounds, scores) "
+            "VALUES ($1, 1, $2, '{}'::jsonb) "
+            "ON CONFLICT (chat_id) DO UPDATE SET current_round = 1, max_rounds = $2, scores = '{}'::jsonb",
             chat_id, max_rounds
         )
     
     await callback.message.answer("Рахунок:\nПоки що 0\n\nЗавдання: 1\n\nЗнайди і сфотографуй число 1.")
     await callback.answer()
 
-# Скасування раунду або Нова гра з кнопок під завданнями
+# Скасування раунду
 @dp.callback_query(F.data.startswith("cancel_round_"))
 async def cancel_round(callback: types.CallbackQuery):
     chat_id = callback.message.chat.id
     async with db_pool.acquire() as conn:
-        game = await conn.fetchrow("SELECT current_round FROM games WHERE chat_id = $1 AND is_active = true", chat_id)
+        game = await conn.fetchrow("SELECT current_round FROM games WHERE chat_id = $1", chat_id)
         if game and game['current_round'] > 1:
             await conn.execute("UPDATE games SET current_round = current_round - 1 WHERE chat_id = $1", chat_id)
             new_round = game['current_round'] - 1
@@ -152,7 +151,7 @@ async def handle_photo(message: types.Message):
     username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
 
     async with db_pool.acquire() as conn:
-        game = await conn.fetchrow("SELECT current_round, max_rounds, scores FROM games WHERE chat_id = $1 AND is_active = true", chat_id)
+        game = await conn.fetchrow("SELECT current_round, max_rounds, scores FROM games WHERE chat_id = $1", chat_id)
         if not game:
             return
 
@@ -164,7 +163,7 @@ async def handle_photo(message: types.Message):
         scores[username] = scores.get(username, 0) + 1
         
         if current_round >= max_rounds:
-            await conn.execute("UPDATE games SET is_active = false, scores = $2 WHERE chat_id = $1", chat_id, json.dumps(scores))
+            await conn.execute("UPDATE games SET scores = $2 WHERE chat_id = $1", chat_id, json.dumps(scores))
             score_text = "\n".join([f"{u}: {s}" for u, s in scores.items()])
             winner = max(scores, key=scores.get)
             
