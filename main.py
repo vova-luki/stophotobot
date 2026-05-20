@@ -35,19 +35,17 @@ async def webhook(request: Request):
     await dp.feed_update(bot, update)
     return {"status": "ok"}
 
-# Перевірка PRO статусу
+# Безпечна перевірка PRO статусу без використання g.players
 async def check_pro_status(chat_id: int = None, user_id: int = None) -> bool:
     async with db_pool.acquire() as conn:
         if user_id:
             row = await conn.fetchrow("SELECT is_pro FROM users WHERE user_id = $1", user_id)
             if row and row['is_pro']:
                 return True
+        # Якщо перевірка по чату, дивимося чи активована pro-гра для цього chat_id
         if chat_id:
-            row = await conn.fetchrow(
-                "SELECT 1 FROM users u JOIN games g ON u.user_id = ANY(g.players) WHERE g.chat_id = $1 AND u.is_pro = true LIMIT 1", 
-                chat_id
-            )
-            if row:
+            row = await conn.fetchrow("SELECT max_rounds FROM games WHERE chat_id = $1 AND is_active = true", chat_id)
+            if row and row['max_rounds'] == 100:
                 return True
     return False
 
@@ -96,7 +94,7 @@ async def send_welcome_rules(chat_id: int):
         "Лише фотографувати їх вдома, на вулиці тощо.\n\n"
         "4. Не можна повторювати двічі числа з однієї локації (номери сторінок у книзі, кнопки в ліфті тощо).\n"
         "Локації мають бути різними.\n\n"
-        "5. Якщо надіслане foto не відповідає правилам, це фото можна відмінити і почати раунд заново.\n"
+        "5. Якщо надіслане фото не відповідає правилам, це фото можна відмінити і почати раунд заново.\n"
         "Щоб перезапустити бота, напишіть в чат команду /start або /play.\n\n"
         "За бажанням, придумайте приз переможцю.\n\n"
         "Натхнення!"
