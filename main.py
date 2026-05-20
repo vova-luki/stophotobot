@@ -6,7 +6,7 @@ import asyncpg
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import RedirectResponse
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ChatMemberHandler, filters, ContextTypes
 
 # --- КОНФІГУРАЦІЯ ТА ЗМІННІ ОТОЧЕННЯ ---
 ADMIN_ID = 124303561
@@ -14,7 +14,7 @@ BASE_URL = os.getenv("BASE_URL", "https://stophotobot-1.onrender.com")
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:stophotobot777@db.wfdgeuhdfluqccbunhiz.supabase.co:6543/postgres")
 MONOBANK_JAR_URL = "https://send.monobank.ua/jar/YOUR_JAR_ID"  # Налаштовується за потреби
 
-# Абсолютна безпека: токен береться виключно із налаштувань Render
+# Токен береться виключно із налаштувань Render
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 if not BOT_TOKEN:
@@ -61,7 +61,11 @@ async def lifespan(app: FastAPI):
         
     # Ініціалізація та встановлення вебхука для бота
     await ptb_app.initialize()
-    await ptb_app.bot.set_webhook(url=f"{BASE_URL}/webhook")
+    # Передаємо allowed_updates, щоб Telegram обов'язково надсилав оновлення членів чату
+    await ptb_app.bot.set_webhook(
+        url=f"{BASE_URL}/webhook", 
+        allowed_updates=["message", "callback_query", "my_chat_member"]
+    )
     app.state.bot = ptb_app.bot
     yield
     # Видалення вебхука та закриття пулу при зупинці додатку
@@ -89,8 +93,10 @@ async def register_user_and_chat(user, chat, pool):
 
 async def get_game_pro_status(chat_id, user_id, pool):
     async with pool.acquire() as conn:
-        user_row = await conn.fetchrow("SELECT is_pro FROM users WHERE user_id = $1", user_id)
-        user_is_pro = user_row['is_pro'] if user_row else False
+        user_is_pro = False
+        if user_id:
+            user_row = await conn.fetchrow("SELECT is_pro FROM users WHERE user_id = $1", user_id)
+            user_is_pro = user_row['is_pro'] if user_row else False
         
         if user_is_pro:
             await conn.execute(
@@ -110,7 +116,8 @@ async def enforce_limits(update: Update, context: ContextTypes.DEFAULT_TYPE, poo
         return True
         
     await register_user_and_chat(user, chat, pool)
-    is_pro = await get_game_pro_status(chat.id, user.id, pool)
+    user_id = user.id if user else None
+    is_pro = await get_game_pro_status(chat.id, user_id, pool)
     
     try:
         member_count = await context.bot.get_chat_member_count(chat.id) - 1
@@ -131,7 +138,8 @@ async def enforce_limits(update: Update, context: ContextTypes.DEFAULT_TYPE, poo
                 "- до 100 раундів назавжди\n"
                 "- у всіх чатах Pro-гравця"
             )
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("КУПИТИ PRO-ВЕРСІЮ", url=f"{BASE_URL}/pay/{user.id}/{chat.id}")]])
+            url_user_id = user.id if user else 0
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("КУПИТИ PRO-ВЕРСІЮ", url=f"{BASE_URL}/pay/{url_user_id}/{chat.id}")]])
             await context.bot.send_message(chat_id=chat.id, text=text, reply_markup=kb)
             return False
     else:
@@ -154,13 +162,13 @@ async def send_rules_post(chat_id: int, bot, is_pro: bool):
         'Вітаємо у грі <a href="https://t.me/stophotobot">100 PHOTO</a>!\n'
         'Правила гри:\n\n'
         '1. Завдання гравців – фотографувати числа (1, 2, 3) і надсилати у цей чат.\n'
-        '2. Безоплатна гра триває 10 раундів, платна – 100 раундів. 1 раунд = 1 фото.\n'
+        '2. Безоплатна гра триває 10 раундів, платна – 100 раундів. 1 раунд = 1 photo.\n'
         'За кожне фото гравець отримує 1 бал.\n\n'
         '3. Числа не можна створювати (викладати предметами) або писати самому.\n'
         'Лише фотографувати їх вдома, на вулиці тощо.\n\n'
         '4. Не можна повторювати двічі числа з однієї локації (номери сторінок у книзі, кнопки в ліфті тощо).\n'
         'Локації мають бути різними.\n\n'
-        '5. Якщо надіслане photo не відповідає правилам, це фото можна відмінити і почати раунд заново.\n'
+        '5. Якщо надіслане фото не відповідає правилам, це фото можна відмінити і почати раунд заново.\n'
         'Щоб перезапустити бота, напишіть в чат команду /start або /play.\n\n'
         'За бажанням, придумайте приз переможцю.\n\n'
         'Натхнення!'
@@ -238,11 +246,42 @@ async def send_end_game_post(chat_id: int, bot, scores: dict, is_pro: bool):
         await bot.send_message(chat_id=chat_id, text=text, reply_markup=InlineKeyboardMarkup(buttons))
 
 # --- ОБРОБНИКИ ТЕЛЕГРАМ-ПОДІЙ ---
+
+# АВТОМАТИЧНИЙ ТРИГЕР: Бот доданий в групу
+async def on_bot_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.my_chat_member:
+        return
+        
+    status = update.my_chat_member.new_chat_member.status
+    # Спрацьовує тільки коли статус стає "учасник" або "адмін"
+    if status in ["member", "administrator"]:
+        chat = update.effective_chat
+        user = update.my_chat_member.from_user # Той, хто додав бота
+        pool = app.state.db_pool
+        
+        # Реєструємо чат та юзера, який його додав
+        await register_user_and_chat(user, chat, pool)
+        is_pro = await get_game_pro_status(chat.id, user.id, pool)
+        
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO games (chat_id, current_round, is_pro, scores, history) "
+                "VALUES ($1, 0, $2, '{}'::jsonb, '[]'::jsonb) "
+                "ON CONFLICT (chat_id) DO UPDATE SET current_round = 0, is_pro = EXCLUDED.is_pro, scores = '{}'::jsonb, history = '[]'::jsonb",
+                chat.id, is_pro
+            )
+            
+        # Рахуємо людей і надсилаємо правила відповідно до лімітів
+        # Створюємо штучний update для функції enforce_limits
+        fake_update = Update(update.update_id, my_chat_member=update.my_chat_member)
+        if await enforce_limits(fake_update, context, pool):
+            await send_rules_post(chat.id, context.bot, is_pro)
+
 async def start_game_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
     if not chat or chat.type == "private":
-        return await private_chat_handler(update, context)
+        return # Особисті повідомлення ігноруються або обробляються private_handler
         
     pool = app.state.db_pool
     await register_user_and_chat(user, chat, pool)
@@ -354,7 +393,6 @@ async def private_chat_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     chat = update.effective_chat
     if not chat or chat.type != "private":
         return
-        
     if update.message:
         await update.message.reply_text(
             "Щоб грати, додай мене у групу з іншими людьми (не в особисті чати, а саме у групу). Знайдеш мене через пошук @stophotobot"
@@ -425,6 +463,7 @@ async def admin_stat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(stat_text)
 
 # Реєстрація обробників у додатку бота
+ptb_app.add_handler(ChatMemberHandler(on_bot_added_to_group, ChatMemberHandler.MY_CHAT_MEMBER))
 ptb_app.add_handler(CommandHandler(["start", "play"], start_game_command))
 ptb_app.add_handler(CommandHandler("stat", admin_stat_handler))
 ptb_app.add_handler(CallbackQueryHandler(callback_handler))
