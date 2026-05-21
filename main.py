@@ -7,17 +7,17 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import Update
 from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.exceptions import TelegramAPIError
 import asyncpg
 
 # Налаштування логування для моніторингу в панелі Render
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Зчитування змінних оточення — БЕЗПЕЧНО, БЕЗ ХАРДКОДУ
+# Зчитування змінних оточення (Суворо за ТЗ) — БЕЗПЕЧНО, БЕЗ ХАРДКОДУ
 TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 BASE_URL = os.getenv("BASE_URL") or "https://stophotobot-1.onrender.com"
 DATABASE_URL = os.getenv("DATABASE_URL")
-RULES_PHOTO_URL = os.getenv("RULES_PHOTO_URL")  # Посилання на картинку з Render (якщо є)
 
 if not TOKEN:
     raise ValueError("BOT_TOKEN або TELEGRAM_TOKEN не зафіксовано в системних змінних оточення!")
@@ -26,20 +26,20 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 db_pool = None
 
-# --- ШАБЛОНИ ТЕКСТІВ ТА КНОПОК СУВОРO ЗА ФАЙЛОМ ТЗ ---
+# --- ШАБЛОНИ ТЕКСТІВ ТА КНОПОК СУВОРO ЗА ФАЙЛОМ ТЗ (БЕЗ ФОТО) ---
 
 def get_welcome_text() -> str:
     return (
         "Вітаємо у грі <a href=\"https://t.me/stophotobot\">100 PHOTO</a>!\n"
-        "Правила集 гри:\n\n"
+        "Правила гри:\n\n"
         "1. Завдання гравців – фотографувати числа (1, 2, 3) і надсилати у цей чат.\n\n"
         "2. Безоплатна гра триває 10 раундів, платна – 100 раундів. 1 раунд = 1 фото. "
         "За кожне фото гравець отримує 1 бал.\n\n"
         "3. Числа не можна створювати (викладати предметами) або писати самому. "
-        "Лише фотографувати їх вдома, на вулиці тощо.\n\n"
+        "Лише photoграфувати їх вдома, на вулиці тощо.\n\n"
         "4. Не можна повторювати двічі числа з однієї локації (номери сторінок у книзі, кнопки в ліфті тощо). "
         "Локації мають бути різними.\n\n"
-        "5. Якщо надіслане фото не відповідає правилам, це photo можна відмінити і почати раунд заново.\n\n"
+        "5. Якщо надіслане фото не відповідає правилам, це фото можна відмінити і почати раунд заново.\n\n"
         "Щоб перезапустити бота, напишіть в чат команду /start або /play.\n\n"
         "За бажанням, придумайте приз переможцю.\n\n"
         "Натхнення!"
@@ -102,34 +102,21 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# --- ЛОГІКА ЗАПУСКУ ТА НАДСИЛАННЯ ПОВІДОМЛЕНЬ ---
+# --- ЛОГІКА НАДСИЛАННЯ ПОВІДОМЛЕНЬ (ВИКЛЮЧНО ТЕКСТ) ---
 
 async def send_rules_message(chat_id: int):
-    """Надсилає ПОСТ 'ПРАВИЛА' з кнопками (Захищено від збоїв фото)"""
-    # Якщо змінна є і вона не порожня
-    if RULES_PHOTO_URL and RULES_PHOTO_URL.strip():
-        try:
-            await bot.send_photo(
-                chat_id=chat_id,
-                photo=RULES_PHOTO_URL.strip(),
-                caption=get_welcome_text(),
-                parse_mode="HTML",
-                reply_markup=get_free_rules_keyboard()
-            )
-            logger.info(f"Правила з фото успішно надіслано в чат {chat_id}")
-            return  # Якщо надіслали успішно — виходимо
-        except Exception as e:
-            logger.error(f"Збій надсилання фото правила ({RULES_PHOTO_URL}): {e}. Перемикаємось на текст.")
-
-    # Резервний чистий текстовий варіант (спрацює, якщо фото немає або воно зламалося)
-    await bot.send_message(
-        chat_id=chat_id,
-        text=get_welcome_text(),
-        parse_mode="HTML",
-        disable_web_page_preview=True,
-        reply_markup=get_free_rules_keyboard()
-    )
-    logger.info(f"Текстові правила успішно надіслано в чат {chat_id}")
+    """Надсилає ПОСТ 'ПРАВИЛА' з кнопками (ТІЛЬКИ ТЕКСТ)"""
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=get_welcome_text(),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=get_free_rules_keyboard()
+        )
+        logger.info(f"Текстові правила успішно надіслано в чат {chat_id}")
+    except TelegramAPIError as e:
+        logger.error(f"Не вдалося надіслати правила в чат {chat_id}: {e}")
 
 async def start_new_game_10_flow(chat_id: int):
     """Ініціалізація гри та виведення ПОСТ 'ЗАВДАННЯ 1' без кнопок"""
@@ -150,7 +137,10 @@ async def start_new_game_10_flow(chat_id: int):
         "Завдання: 1\n\n"
         "Знайди і сфотографуй число 1."
     )
-    await bot.send_message(chat_id=chat_id, text=task1_text)
+    try:
+        await bot.send_message(chat_id=chat_id, text=task1_text)
+    except TelegramAPIError as e:
+        logger.error(f"Помилка надсилання Завдання 1 у чат {chat_id}: {e}")
 
 # --- ОБРОБКА КОМАНД ТА ПОДІЙ ---
 
@@ -207,11 +197,11 @@ async def handle_photo(message: types.Message):
         round_msg = f"Рахунок\n{score_text}\n\nЗавдання: {next_round}"
         await message.answer(round_msg, reply_markup=get_free_game_keyboard(next_round))
 
-# --- ОБРОБКА CALLBACK КНОПОК ---
+# --- ОБРОБКА CALLBACK КНОПОК (ВИПРАВЛЕНО РЕАКЦІЮ) ---
 
 @dp.callback_query(F.data == "start_game_10")
 async def callback_start_game_10(callback: types.CallbackQuery):
-    await callback.answer()
+    await callback.answer()  # Підтверджуємо Telegram, що клік оброблено (прибирає годинничок)
     await start_new_game_10_flow(callback.message.chat.id)
 
 @dp.callback_query(F.data.startswith("cancel_round_"))
@@ -220,6 +210,7 @@ async def cancel_round(callback: types.CallbackQuery):
     try:
         target_round = int(callback.data.split("_")[-1])
     except ValueError:
+        await callback.answer()
         return
 
     async with db_pool.acquire() as conn:
@@ -275,6 +266,7 @@ async def callback_add_players(callback: types.CallbackQuery):
 async def webhook(request: Request):
     json_str = await request.body()
     update = Update.model_validate_json(json_str)
+    # Передаємо боту апдейт з явним очікуванням обробки через диспетчер
     await dp.feed_update(bot, update)
     return {"status": "ok"}
 
