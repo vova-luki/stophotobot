@@ -32,14 +32,14 @@ def get_welcome_text() -> str:
     return (
         "Вітаємо у грі <a href=\"https://t.me/stophotobot\">100 PHOTO</a>!\n\n"
         "Правила гри:\n\n"
-        "1. Завдання гравців – фотографувати числа (1, 2, 3) і надсилати у цей чат.\n\n"
+        "1. Завдання гравців – фотографувати числа (1, 2, 3) i надсилати у цей чат.\n\n"
         "2. Безоплатна гра триває 10 раундів, платна – 100 раундів. 1 раунд = 1 photo. "
         "За кожне фото гравець отримує 1 бал.\n\n"
         "3. Числа не можна створювати (викладати предметами) або писати самому. "
         "Лише photoграфувати їх вдома, на вулиці тощо.\n\n"
         "4. Не можна повторювати двічі числа з однієї локації (номери сторінок у книзі, кнопки в ліфті тощо). "
         "Локації мають бути різними.\n\n"
-        "5. Якщо надіслане фото не відповідає правилам, це photo можна відмінити і почати раунд заново.\n\n"
+        "5. Якщо надіслане photo не відповідає правилам, це photo можна відмінити і почати раунд заново.\n\n"
         "Щоб перезапустити бота, напишіть в чат команду /start або /play.\n\n"
         "За бажанням, придумайте приз переможцю.\n\n"
         "Натхнення!"
@@ -98,7 +98,7 @@ app = FastAPI(lifespan=lifespan)
 # --- ОБРОБКА КОМАНД ТА ПОДІЙ ДОДАННЯ БОТА ---
 
 async def send_start_game_flow(chat_id: int):
-    """Генерація старту гри строго за твоїм текстовим шаблоном"""
+    """Генерація старту гри строго за текстовим шаблоном"""
     # 1. Спершу відправляємо правила
     await bot.send_message(
         chat_id=chat_id,
@@ -119,7 +119,7 @@ async def send_start_game_flow(chat_id: int):
             chat_id
         )
     
-    # 2. ПОСТ "ЗАВДАННЯ 1" суворо за надісланим тобою шаблоном
+    # 2. ПОСТ "ЗАВДАННЯ 1" суворо за надісланим шаблоном
     task1_text = (
         "Рахунок\n"
         f"{p1}: 0\n"
@@ -129,12 +129,11 @@ async def send_start_game_flow(chat_id: int):
     )
     await bot.send_message(chat_id=chat_id, text=task1_text, reply_markup=get_game_keyboard(1))
 
-# Універсальний хендлер оновлення статусу члена чату (Замість забагованого ChatMemberUpdatedFilter)
+# Універсальний хендлер оновлення статусу члена чату
 @dp.my_chat_member()
 async def on_bot_join(event: ChatMemberUpdated):
-    # Якщо бот доданий як звичайний учасник або адмін
     if event.new_chat_member.status in ["member", "administrator"]:
-        logger.info(f"Бот успішно ініціалізований та доданий в групу: {event.chat.id}")
+        logger.info(f"Бот успішно ініціалізований через my_chat_member у групі: {event.chat.id}")
         await send_start_game_flow(event.chat.id)
 
 @dp.message(Command("start", "play"))
@@ -147,6 +146,14 @@ async def cmd_start(message: types.Message):
             "Щоб грати, додай мене у групу з іншими людьми (не в особисті чати, а саме у групу). "
             "Знайдеш мене через пошук @stophotobot"
         )
+
+# Підстраховка: відловлювання події додавання бота через службове повідомлення чату
+@dp.message(F.new_chat_members)
+async def on_bot_added_as_member(message: types.Message):
+    for member in message.new_chat_members:
+        if member.id == message.bot.id:
+            logger.info(f"Бота додано в групу {message.chat.id} через системне повідомлення new_chat_members")
+            await send_start_game_flow(message.chat.id)
 
 # Адмін-команда статистика (Доступна ТІЛЬКИ в приваті твого ID)
 @dp.message(Command("stat"))
@@ -211,7 +218,6 @@ async def cancel_round(callback: types.CallbackQuery):
 
     async with db_pool.acquire() as conn:
         game = await conn.fetchrow("SELECT current_round, scores FROM games WHERE chat_id = $1", chat_id)
-        # Скасовувати можна лише попередній раунд відносно поточного завдання
         if not game or game['current_round'] - 1 != target_round:
             await callback.answer("Цей раунд вже не можна обнулити!", show_alert=True)
             return
