@@ -13,11 +13,11 @@ import asyncpg
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Зчитування змінних оточення (Суворо за ТЗ) — БЕЗПЕЧНО, БЕЗ ХАРДКОДУ
+# Зчитування змінних оточення — БЕЗПЕЧНО, БЕЗ ХАРДКОДУ
 TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
 BASE_URL = os.getenv("BASE_URL") or "https://stophotobot-1.onrender.com"
 DATABASE_URL = os.getenv("DATABASE_URL")
-RULES_PHOTO_URL = os.getenv("RULES_PHOTO_URL") # Передається через Render за бажанням
+RULES_PHOTO_URL = os.getenv("RULES_PHOTO_URL")  # Посилання на картинку з Render (якщо є)
 
 if not TOKEN:
     raise ValueError("BOT_TOKEN або TELEGRAM_TOKEN не зафіксовано в системних змінних оточення!")
@@ -31,15 +31,15 @@ db_pool = None
 def get_welcome_text() -> str:
     return (
         "Вітаємо у грі <a href=\"https://t.me/stophotobot\">100 PHOTO</a>!\n"
-        "Правила гри:\n\n"
+        "Правила集 гри:\n\n"
         "1. Завдання гравців – фотографувати числа (1, 2, 3) і надсилати у цей чат.\n\n"
         "2. Безоплатна гра триває 10 раундів, платна – 100 раундів. 1 раунд = 1 фото. "
-        "За кожне photo гравець отримує 1 бал.\n\n"
+        "За кожне фото гравець отримує 1 бал.\n\n"
         "3. Числа не можна створювати (викладати предметами) або писати самому. "
         "Лише фотографувати їх вдома, на вулиці тощо.\n\n"
         "4. Не можна повторювати двічі числа з однієї локації (номери сторінок у книзі, кнопки в ліфті тощо). "
         "Локації мають бути різними.\n\n"
-        "5. Якщо надіслане фото не відповідає правилам, це фото можна відмінити і почати раунд заново.\n\n"
+        "5. Якщо надіслане фото не відповідає правилам, це photo можна відмінити і почати раунд заново.\n\n"
         "Щоб перезапустити бота, напишіть в чат команду /start або /play.\n\n"
         "За бажанням, придумайте приз переможцю.\n\n"
         "Натхнення!"
@@ -57,7 +57,6 @@ def get_free_rules_keyboard() -> types.InlineKeyboardMarkup:
 def get_free_game_keyboard(current_round: int) -> types.InlineKeyboardMarkup:
     """Кнопки для ПОСТУ ЗАВДАННЯ 2-10 (FREE-ВЕРСІЯ)"""
     builder = InlineKeyboardBuilder()
-    # Кнопка обнулення показує попередній раунд (X-1)
     builder.button(text=f"ОБНУЛИТИ РАУНД {current_round - 1}", callback_data=f"cancel_round_{current_round - 1}")
     builder.button(text="НОВА ГРА ДО 10", callback_data="start_game_10")
     builder.button(text="НОВА ГРА ДО 100", callback_data="buy_pro")
@@ -106,20 +105,23 @@ app = FastAPI(lifespan=lifespan)
 # --- ЛОГІКА ЗАПУСКУ ТА НАДСИЛАННЯ ПОВІДОМЛЕНЬ ---
 
 async def send_rules_message(chat_id: int):
-    """Надсилає ПОСТ 'ПРАВИЛА' з кнопками"""
-    if RULES_PHOTO_URL:
+    """Надсилає ПОСТ 'ПРАВИЛА' з кнопками (Захищено від збоїв фото)"""
+    # Якщо змінна є і вона не порожня
+    if RULES_PHOTO_URL and RULES_PHOTO_URL.strip():
         try:
             await bot.send_photo(
                 chat_id=chat_id,
-                photo=RULES_PHOTO_URL,
+                photo=RULES_PHOTO_URL.strip(),
                 caption=get_welcome_text(),
                 parse_mode="HTML",
                 reply_markup=get_free_rules_keyboard()
             )
-            return
+            logger.info(f"Правила з фото успішно надіслано в чат {chat_id}")
+            return  # Якщо надіслали успішно — виходимо
         except Exception as e:
-            logger.error(f"Помилка надсилання фото: {e}")
+            logger.error(f"Збій надсилання фото правила ({RULES_PHOTO_URL}): {e}. Перемикаємось на текст.")
 
+    # Резервний чистий текстовий варіант (спрацює, якщо фото немає або воно зламалося)
     await bot.send_message(
         chat_id=chat_id,
         text=get_welcome_text(),
@@ -127,6 +129,7 @@ async def send_rules_message(chat_id: int):
         disable_web_page_preview=True,
         reply_markup=get_free_rules_keyboard()
     )
+    logger.info(f"Текстові правила успішно надіслано в чат {chat_id}")
 
 async def start_new_game_10_flow(chat_id: int):
     """Ініціалізація гри та виведення ПОСТ 'ЗАВДАННЯ 1' без кнопок"""
@@ -147,7 +150,6 @@ async def start_new_game_10_flow(chat_id: int):
         "Завдання: 1\n\n"
         "Знайди і сфотографуй число 1."
     )
-    # Зверни увагу: для Завдання 1 reply_markup НЕ передається (відповідно до ТЗ)
     await bot.send_message(chat_id=chat_id, text=task1_text)
 
 # --- ОБРОБКА КОМАНД ТА ПОДІЙ ---
@@ -189,7 +191,6 @@ async def handle_photo(message: types.Message):
         username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
         scores[username] = scores.get(username, 0) + 1
         
-        # Кінець гри (Раунд 10 пройдено)
         if current_round >= max_rounds:
             await conn.execute("UPDATE games SET current_round = $2, scores = $3 WHERE chat_id = $1", chat_id, current_round, json.dumps(scores))
             score_text = "\n".join([f"{u}: {s}" for u, s in scores.items()])
@@ -199,7 +200,6 @@ async def handle_photo(message: types.Message):
             await message.answer(end_text, reply_markup=get_free_game_keyboard(current_round + 1))
             return
 
-        # Перехід на ПОСТ "ЗАВДАННЯ 2-10"
         next_round = current_round + 1
         await conn.execute("UPDATE games SET current_round = $2, scores = $3 WHERE chat_id = $1", chat_id, next_round, json.dumps(scores))
         
@@ -240,7 +240,6 @@ async def cancel_round(callback: types.CallbackQuery):
     score_text = "\n".join([f"{u}: {s}" for u, s in scores.items()])
     
     if target_round == 1:
-        # Повернення на Завдання 1 (без кнопок)
         msg_text = f"Рахунок\n{score_text}\n\nЗавдання: 1\n\nЗнайди і сфотографуй число 1."
         await callback.message.answer(msg_text)
     else:
@@ -256,9 +255,8 @@ async def callback_buy_pro(callback: types.CallbackQuery):
         "- до 100 раундів назавжди\n"
         "- у всіх чатах Pro-гравця"
     )
-    # Кнопки для поста ОПЛАТА
     builder = InlineKeyboardBuilder()
-    builder.button(text="КУПИТИ PRO-ВЕРСІЮ", url="https://monobank.ua") # Заглушка посилання оплати
+    builder.button(text="КУПИТИ PRO-ВЕРСІЮ", url="https://monobank.ua")
     builder.button(text="ПРОДОВЖИТИ ГРУ УДВОХ", callback_data="start_game_10")
     builder.adjust(1)
     await callback.message.answer(pro_text, reply_markup=builder.as_markup())
