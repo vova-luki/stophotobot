@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 import asyncio
 from datetime import datetime, timedelta
@@ -54,7 +55,6 @@ async def get_chat_pro_status(chat_id: int) -> bool:
             return True
         
         if game and game['players']:
-            import json
             players = json.loads(game['players'])
             if players:
                 user_ids = [int(uid) for uid in players.keys() if uid.isdigit()]
@@ -85,7 +85,6 @@ async def set_user_pro_status(user_id: int, is_pro: bool):
         )
 
 async def init_or_get_game(chat_id: int) -> dict:
-    import json
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT status, current_round, players, last_photo_by WHERE chat_id = $1", chat_id)
@@ -106,7 +105,6 @@ async def init_or_get_game(chat_id: int) -> dict:
         }
 
 async def save_game(chat_id: int, status: str, current_round: int, players: dict, last_photo_by: int = None):
-    import json
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         await conn.execute(
@@ -180,7 +178,7 @@ async def send_welcome_rules(chat_id: int):
     text = (
         'Вітаємо у <a href="https://t.me/stophotobot">100 PHOTO</a>!\n'
         'Правила гри:\n\n'
-        '1. Завдання гравців – фотографувати числа (1, 2, 3) і надсилати у цей чат. 1 раунд = 1 фото.\n\n'
+        '1. Завдання гравців – фотографувати числа (1, 2, 3) і надсилати у цей чат. 1 раунд = 1 photo.\n\n'
         '2. За кожне фото гравець отримує 1 бал. Безоплатна гра триває 10 раундів, платна – 100 раундів.\n\n'
         '3. Числа не можна створювати (викладати предметами) або писати самому. Лише фотографувати їх вдома, на вулиці тощо.\n\n'
         '4. Не можна брати двічі числа з однієї локації (номери сторінок у книзі, кнопки в ліфті тощо).\n'
@@ -479,7 +477,7 @@ async def process_game_photo(message: types.Message):
     count = await message.chat.get_member_count()
     actual_chat_members = count - 1
     
-    # Сувора перевірка лімітів кількості учасників у чаті
+    # Сувора перевірка лімітів кількості учасників у чаті на базі поточного статусу гри
     if not is_pro and actual_chat_members >= 3:
         await message.answer(
             "Щоб грати втрьох і більше, хоча б 1 гравець має бути Pro.\n"
@@ -576,10 +574,19 @@ async def monobank_webhook(request: Request):
     data = await request.json()
     amount = data.get("data", {}).get("amount", 0)
     
+    # Активація PRO при сумі від 100 грн (10000 копійок)
     if amount >= 10000:
-        user_id = data.get("data", {}).get("statementAccountId")
-        if user_id and str(user_id).isdigit():
-            user_id = int(user_id)
+        comment = data.get("data", {}).get("comment", "")
+        user_id = None
+        
+        # Шукаємо Telegram ID у коментарі до транзакції
+        words = comment.split()
+        for word in words:
+            if word.isdigit() and len(word) >= 7:
+                user_id = int(word)
+                break
+                
+        if user_id:
             await set_user_pro_status(user_id, True)
             
             try:
@@ -587,6 +594,7 @@ async def monobank_webhook(request: Request):
                 u_name = f"@{user_row.username}" if user_row.username else user_row.first_name
                 
                 text = (
+                    f"ОПЛАТА УСПІШНА!\n\n"
                     f"Дякую, оплата є!\n"
                     f"– {u_name} тепер Pro\n"
                     f"– відкрито 100 раундів\n"
