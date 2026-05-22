@@ -18,7 +18,7 @@ import asyncpg
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Зчитування змінних оточення (Жорстке правило безпеки: без хардкоду!)
+# Зчитування змінних оточення
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BASE_URL = os.getenv("BASE_URL")
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -38,8 +38,6 @@ db_pool: Optional[asyncpg.Pool] = None
 async def init_db_pool():
     global db_pool
     if db_pool is None:
-        # Прибираємо port=6543, asyncpg візьме його з рядка DATABASE_URL
-        # Додаємо statement_cache_size=0 для сумісності з PgBouncer
         db_pool = await asyncpg.create_pool(
             dsn=DATABASE_URL, 
             min_size=1, 
@@ -79,10 +77,10 @@ async def save_game_state(chat_id: int, current_round: int, scores: dict):
 async def get_clean_member_count(chat_id: int) -> int:
     try:
         count = await bot.get_chat_member_count(chat_id)
-        return count - 1  # Завжди віднімаємо самого бота з підрахунку
+        return max(1, count - 1)  # Захист: мінімум 1 гравець, якщо бот не зміг порахувати чат
     except TelegramAPIError as e:
         logger.error(f"Помилка підрахунку учасників у чаті {chat_id}: {e}")
-        return 0
+        return 2 # Дефолтне значення для безпечного старту
 
 # --- Головна логіка перевірки учасників та відправки постів ---
 async def evaluate_and_send_post(chat_id: int, trigger_user_id: Optional[int] = None):
@@ -91,7 +89,7 @@ async def evaluate_and_send_post(chat_id: int, trigger_user_id: Optional[int] = 
         players_count = await get_clean_member_count(chat_id)
         is_pro = await check_chat_pro_status(chat_id)
 
-        # Якщо ліміт перевищено, гра блокується
+        # Якщо ліміт безкоштовної версії перевищено
         if not is_pro and players_count >= 3:
             builder = InlineKeyboardBuilder()
             builder.button(text="КУПИТИ PRO-ВЕРСІЮ", url=MONOBANK_PAY_URL)
@@ -106,6 +104,7 @@ async def evaluate_and_send_post(chat_id: int, trigger_user_id: Optional[int] = 
             )
             return
 
+        # Максимум для PRO системи
         if is_pro and players_count >= 11:
             builder = InlineKeyboardBuilder()
             builder.button(text="НАС ВЖЕ 10", callback_data="refresh_status")
@@ -117,7 +116,8 @@ async def evaluate_and_send_post(chat_id: int, trigger_user_id: Optional[int] = 
             )
             return
 
-        if players_count == 1:
+        # Якщо гравець один
+        if players_count <= 1:
             builder = InlineKeyboardBuilder()
             builder.button(text="НОВА ГРА ДО 10" if not is_pro else "НОВА ГРА", callback_data="new_game_10" if not is_pro else "new_game_100")
             await bot.send_message(
@@ -159,7 +159,6 @@ async def evaluate_and_send_post(chat_id: int, trigger_user_id: Optional[int] = 
 
 # --- Обробники для Групових чатів ---
 
-# Відстеження події додавання самого БОТА в групу/супергрупу
 @dp.my_chat_member(
     F.old_chat_member.status.in_({"left", "kicked"}) & 
     F.new_chat_member.status.in_({"member", "administrator"})
@@ -168,19 +167,16 @@ async def bot_added_to_group(event: ChatMemberUpdated):
     if event.chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
         await evaluate_and_send_post(event.chat.id, trigger_user_id=event.from_user.id)
 
-# Моніторинг входу КОРИСТУВАЧІВ
 @dp.chat_member(F.new_chat_member.status == "member")
 async def user_joined_group(event: ChatMemberUpdated):
     if event.chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
         logger.info(f"Користувач {event.new_chat_member.user.id} зайшов у групу {event.chat.id}")
 
-# Моніторинг виходу КОРИСТУВАЧІВ
 @dp.chat_member(F.new_chat_member.status.in_({"left", "kicked"}))
 async def user_left_group(event: ChatMemberUpdated):
     if event.chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
         logger.info(f"Користувач {event.old_chat_member.user.id} покинув групу {event.chat.id}")
 
-# Обробка текстових команд у групах
 @dp.message(F.chat.type.in_({"group", "supergroup"}), Command(commands=["start", "play"]))
 async def group_reset_command(message: types.Message):
     await evaluate_and_send_post(message.chat.id, trigger_user_id=message.from_user.id)
@@ -253,17 +249,17 @@ async def process_incoming_photo(message: types.Message):
     user_identity = message.from_user.full_name if message.from_user.full_name else f"@{message.from_user.username}"
     scores[user_identity] = scores.get(user_identity, 0) + 1
     
-    # --- Формування рахунку (Виправлено) ---
+    # Динамічне формування списку гравців із заглушками
     score_board = ["Рахунок"]
     for usr, pts in scores.items():
         score_board.append(f"{usr}: {pts}")
     
-    # Додаємо заглушки, якщо гравців менше ніж 2
-    if len(scores) < 2:
-        score_board.append("player 2: 0")
+    # Додаємо автоматичні заглушки до ліміту реальних учасників групи (мінімум до 2)
+    total_slots = max(2, players_count)
+    for i in range(len(scores), total_slots):
+        score_board.append(f"player {i + 1}: 0")
         
     score_text = "\n".join(score_board)
-    # --- Кінець формування ---
 
     if current_round >= max_rounds:
         winner = max(scores, key=scores.get) if scores else "@user"
@@ -332,7 +328,7 @@ async def undo_round_callback(callback: types.CallbackQuery):
     await callback.message.answer(task_text, reply_markup=builder.as_markup())
     await callback.answer()
 
-# --- Логіка приватного чату (Заглушка та Моніторинг /stat) ---
+# --- Логіка приватного чату ---
 
 @dp.message(F.chat.type == ChatType.PRIVATE, Command("stat"))
 async def sys_admin_stat(message: types.Message):
@@ -399,7 +395,6 @@ async def private_stub_response(message: types.Message):
         "Щоб грати, додай мене у групу з іншими людьми (не в особисті чати, а саме у групу).\n\n"
         "Знайдеш мене через пошук – @stophotobot"
     )
-
 
 # --- FastAPI Webhook Lifespan ---
 
