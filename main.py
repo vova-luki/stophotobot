@@ -47,6 +47,13 @@ async def init_db_pool():
             statement_cache_size=0 
         )
 
+async def register_chat(chat_id: int):
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO chats (chat_id, is_pro, created_at) VALUES ($1, FALSE, NOW()) ON CONFLICT (chat_id) DO NOTHING",
+            chat_id
+        )
+
 async def check_chat_pro_status(chat_id: int) -> bool:
     async with db_pool.acquire() as conn:
         val = await conn.fetchval("SELECT is_pro FROM chats WHERE chat_id = $1", chat_id)
