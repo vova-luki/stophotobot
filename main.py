@@ -7,8 +7,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response, status
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.enums import ChatType
-from aiogram.filters import Command, ChatMemberUpdatedFilter, JOIN_TRANSITION
+from aiogram.enums import ChatType, ChatMemberStatus
+from aiogram.filters import Command, ChatMemberUpdatedFilter
+from aiogram.types import ChatMemberUpdated
 from aiogram.exceptions import TelegramAPIError
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 import asyncpg
@@ -140,7 +141,7 @@ async def evaluate_and_send_post(chat_id: int, trigger_user_id: Optional[int] = 
             "Лише фотографувати їх вдома, на вулиці тощо.\n\n"
             "4. Не можна брати двічі числа з однієї локації (номери сторінок у книзі, кнопки в ліфті тощо).\n"
             "Локації мають бути різними.\n\n"
-            "5. Якщо надіслане фото не відповідає правилам, це фото можна відмінити і почати раунд заново.\n"
+            "5. Якщо надіслане foto не відповідає правилам, це фото можна відмінити і почати раунд заново.\n"
             "Щоб перезапустити бота, напишіть у чат команду /start або /play.\n\n"
             "За бажанням, придумайте приз переможцю.\n\n"
             "Натхнення!"
@@ -151,8 +152,14 @@ async def evaluate_and_send_post(chat_id: int, trigger_user_id: Optional[int] = 
 
 # --- Обробники для Групових чатів ---
 
-@dp.my_chat_member(ChatMemberUpdatedFilter(member_id_change=JOIN_TRANSITION))
-async def bot_added_to_group(event: types.ChatMemberUpdated):
+# Оновлена фільтрація для додавання бота у групу в aiogram 3.x
+@dp.my_chat_member(
+    ChatMemberUpdatedFilter(
+        old_chat_member_status=[ChatMemberStatus.LEFT, ChatMemberStatus.KICKED],
+        new_chat_member_status=[ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR]
+    )
+)
+async def bot_added_to_group(event: ChatMemberUpdated):
     if event.chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
         await evaluate_and_send_post(event.chat.id, trigger_user_id=event.from_user.id)
 
