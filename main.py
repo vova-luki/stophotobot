@@ -393,6 +393,7 @@ async def private_stub_response(message: types.Message):
         "Знайдеш мене через пошук – @stophotobot"
     )
 
+
 # --- FastAPI Webhook Lifespan ---
 
 @asynccontextmanager
@@ -407,17 +408,14 @@ async def lifespan(app: FastAPI):
         )
         logger.info(f"Вебхук підключено до: {web_url}")
     except Exception as e:
-        logger.error(f"Помилка встановлення вебхуку під час запуску: {e}")
+        logger.error(f"Помилка встановлення вебхуку: {e}")
     yield
     try:
         await bot.delete_webhook()
-        logger.info("Вебхук видалено.")
-    except Exception as e:
-        logger.error(f"Помилка видалення вебхуку: {e}")
-        
+    except:
+        pass
     if db_pool:
         await db_pool.close()
-    logger.info("Сесії бази даних закрито.")
 
 app = FastAPI(lifespan=lifespan)
 
@@ -431,7 +429,7 @@ async def inbound_tg_updates(request: Request):
     except Exception as e:
         logger.error(f"Помилка обробки вебхуку: {e}")
         return Response(status_code=status.HTTP_200_OK)
-
+        
 # --- Обробка платежів Monobank ---
 
 @app.post("/monobank-webhook")
