@@ -8,8 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response, status
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ChatType, ChatMemberStatus
-from aiogram.filters import Command, ChatMemberUpdatedFilter
-from aiogram.filters.chat_member_updated import JOIN_TRANSITION, LEAVE_TRANSITION, IS_NOT_MEMBER, IS_MEMBER, IS_ADMIN
+from aiogram.filters import Command
 from aiogram.types import ChatMemberUpdated
 from aiogram.exceptions import TelegramAPIError
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -176,7 +175,7 @@ async def user_left_group(event: ChatMemberUpdated):
         logger.info(f"Користувач {event.old_chat_member.user.id} покинув групу {event.chat.id}")
 
 # Обробка текстових команд у групах
-@dp.message(F.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}), Command(commands=["start", "play"]))
+@dp.message(F.chat.type.in_({"group", "supergroup"}), Command(commands=["start", "play"]))
 async def group_reset_command(message: types.Message):
     await evaluate_and_send_post(message.chat.id, trigger_user_id=message.from_user.id)
 
