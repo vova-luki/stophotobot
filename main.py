@@ -151,7 +151,6 @@ async def evaluate_and_send_post(chat_id: int, trigger_user_id: Optional[int] = 
 
 # --- Обробники для Групових чатів ---
 
-# ВИПРАВЛЕНО: Змінено параметр member_change на member_id_change
 @dp.my_chat_member(ChatMemberUpdatedFilter(member_id_change=JOIN_TRANSITION))
 async def bot_added_to_group(event: types.ChatMemberUpdated):
     if event.chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
