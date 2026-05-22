@@ -89,7 +89,7 @@ async def evaluate_and_send_post(chat_id: int, trigger_user_id: Optional[int] = 
         players_count = await get_clean_member_count(chat_id)
         is_pro = await check_chat_pro_status(chat_id)
 
-        # Якщо ліміт безкоштовної версії перевищено
+        # Якщо ліміт безкоштовної версії перевищено (3 або більше людей)
         if not is_pro and players_count >= 3:
             builder = InlineKeyboardBuilder()
             builder.button(text="КУПИТИ PRO-ВЕРСІЮ", url=MONOBANK_PAY_URL)
@@ -104,7 +104,7 @@ async def evaluate_and_send_post(chat_id: int, trigger_user_id: Optional[int] = 
             )
             return
 
-        # Максимум для PRO системи
+        # Максимум для PRO системи (11 або більше людей)
         if is_pro and players_count >= 11:
             builder = InlineKeyboardBuilder()
             builder.button(text="НАС ВЖЕ 10", callback_data="refresh_status")
@@ -119,7 +119,10 @@ async def evaluate_and_send_post(chat_id: int, trigger_user_id: Optional[int] = 
         # Якщо гравець один
         if players_count <= 1:
             builder = InlineKeyboardBuilder()
-            builder.button(text="НОВА ГРА ДО 10" if not is_pro else "НОВА ГРА", callback_data="new_game_10" if not is_pro else "new_game_100")
+            if not is_pro:
+                builder.button(text="НОВА ГРА ДО 10", callback_data="new_game_10")
+            else:
+                builder.button(text="НОВА ГРА", callback_data="new_game_100")
             await bot.send_message(
                 chat_id,
                 "Щоб грати, додайте в групу другого гравця.\n\n"
@@ -139,16 +142,14 @@ async def evaluate_and_send_post(chat_id: int, trigger_user_id: Optional[int] = 
             builder.button(text="НОВА ГРА", callback_data="new_game_100")
             
         rules_text = (
-            "Вітаємо у грі <a href=\"https://t.me/stophotobot\">100 PHOTO</a>!\n"
+            "Вітаємо у <a href=\"https://t.me/stophotobot\">100 PHOTO</a>!\n"
             "Правила гри:\n\n"
-            "1. Завдання гравців – фотографувати числа (1, 2, 3) і надсилати у цей чат.\n"
-            "2. Безоплатна гра триває 10 раундів, платна – 100 раундів. 1 раунд = 1 photo.\n"
-            "За кожне photo гравець отримує 1 бал.\n\n"
-            "3. Числа не можна створювати (викладати предметами) або писати самому.\n"
-            "Лише photoграфувати їх вдома, на вулиці тощо.\n\n"
+            "1. Завдання гравців – фотографувати числа (1, 2, 3) і надсилати у цей чат. 1 раунд = 1 фото.\n"
+            "2. За кожне фото гравець отримує 1 бал. Безоплатна гра триває 10 раундів, платна – 100 раундів.\n"
+            "3. Числа не можна створювати (викладати предметами) або писати самому. Лише фотографувати їх вдома, на вулиці тощо.\n"
             "4. Не можна брати двічі числа з однієї локації (номери сторінок у книзі, кнопки в ліфті тощо).\n"
             "Локації мають бути різними.\n\n"
-            "5. Якщо надіслане foto не відповідає правилам, це foto можна відмінити і почати раунд заново.\n"
+            "5. Якщо надіслане фото не відповідає правилам, це фото можна відмінити і почати раунд заново.\n"
             "Щоб перезапустити бота, напишіть у чат команду /start або /play.\n\n"
             "За бажанням, придумайте приз переможцю.\n\n"
             "Натхнення!"
@@ -205,25 +206,40 @@ async def payment_post_callback(callback: types.CallbackQuery):
 @dp.callback_query(F.message.chat.type.in_({ChatType.GROUP, ChatType.SUPERGROUP}), F.data.in_({"new_game_10", "new_game_100"}))
 async def init_game_rounds(callback: types.CallbackQuery):
     chat_id = callback.message.chat.id
-    await save_game_state(chat_id, 1, {})
+    
+    # Виправляємо баг з іменами: дістаємо старий стан, щоб зберегти імена реальних гравців, обнуляючи бали
+    current_game = await get_game_state(chat_id)
+    reset_scores = {}
+    if current_game and current_game.get("scores"):
+        for player in current_game["scores"].keys():
+            reset_scores[player] = 0
+            
+    await save_game_state(chat_id, 1, reset_scores)
+    is_pro = (callback.data == "new_game_100")
+    
+    # Формуємо красиву дошку з іменами (якщо вони є), або показуємо дефолтні заглушки
+    score_board = ["Рахунок"]
+    if reset_scores:
+        for usr, pts in reset_scores.items():
+            score_board.append(f"{usr}: {pts}")
+        if is_pro and len(reset_scores) < 3:
+            # Якщо це про-версія, візуально натякаємо на можливість багатьох гравців за допомогою "…"
+            score_board.append("…")
+            score_board.append("player N: 0")
+    else:
+        score_board.append("player 1: 0")
+        score_board.append("player 2: 0")
+        if is_pro:
+            score_board.append("…")
+            score_board.append("player N: 0")
+            
+    score_text = "\n".join(score_board)
     
     start_text = (
-        "Рахунок\n"
-        "player 1: 0\n"
-        "player 2: 0\n\n"
-        "Завдання: 1\n\n"
-        "Знайди і сфотографуй число 1."
+        f"Раунд 1.\n\n"
+        f"{score_text}\n\n"
+        f"Завдання: сфотографуй число 1."
     )
-    if callback.data == "new_game_100":
-        start_text = (
-            "Рахунок\n"
-            "player 1: 0\n"
-            "player 2: 0\n"
-            "…\n"
-            "player N: 0\n\n"
-            "Завдання: 1\n\n"
-            "Знайди і сфотографуй число 1."
-        )
     await callback.message.answer(start_text)
     await callback.answer()
 
@@ -249,21 +265,26 @@ async def process_incoming_photo(message: types.Message):
     user_identity = message.from_user.full_name if message.from_user.full_name else f"@{message.from_user.username}"
     scores[user_identity] = scores.get(user_identity, 0) + 1
     
-    # Динамічне формування списку гравців із заглушками
+    # Динамічне формування списку гравців
     score_board = ["Рахунок"]
     for usr, pts in scores.items():
         score_board.append(f"{usr}: {pts}")
     
-    # Додаємо автоматичні заглушки до ліміту реальних учасників групи (мінімум до 2)
-    total_slots = max(2, players_count)
-    for i in range(len(scores), total_slots):
-        score_board.append(f"player {i + 1}: 0")
+    # Якщо гравців мало, докидуємо заглушки (мінімум до 2)
+    if len(scores) < 2 and players_count <= 2:
+        total_slots = max(2, players_count)
+        for i in range(len(scores), total_slots):
+            score_board.append(f"player {i + 1}: 0")
+    elif is_pro and len(scores) >= 2:
+        # Для PRO-версії додаємо три крапки перед умовним player N, як у шаблоні дока
+        score_board.append("…")
+        score_board.append(f"player N: 0")
         
     score_text = "\n".join(score_board)
 
     if current_round >= max_rounds:
         winner = max(scores, key=scores.get) if scores else "@user"
-        end_text = f"{score_text}\n\nПереможець: {winner}\n\nНе забудь про свій приз!"
+        end_text = f"Переможець: {winner}\n\n{score_text}\n\nНе забудь про свій приз!"
         
         builder = InlineKeyboardBuilder()
         builder.button(text=f"ОБНУЛИТИ РАУНД {current_round}", callback_data=f"undo_{current_round}")
@@ -281,7 +302,14 @@ async def process_incoming_photo(message: types.Message):
         next_round = current_round + 1
         await save_game_state(chat_id, next_round, scores)
         
-        task_text = f"{score_text}\n\nЗавдання: {next_round}\n\nЗнайди і сфотографуй число {next_round}."
+        # Точкове налаштування правила: для 1-го раунду довго, для наступних — коротко
+        if next_round == 1:
+            task_instruction = "сфотографуй число 1."
+        else:
+            task_instruction = f"число {next_round}"
+            
+        task_text = f"Раунд {next_round}.\n\n{score_text}\n\nЗавдання: {task_instruction}"
+        
         builder = InlineKeyboardBuilder()
         builder.button(text=f"ОБНУЛИТИ РАУНД {current_round}", callback_data=f"undo_{current_round}")
         builder.button(text="НОВА ГРА" if is_pro else "НОВА ГРА ДО 10", callback_data="new_game_100" if is_pro else "new_game_10")
@@ -318,7 +346,14 @@ async def undo_round_callback(callback: types.CallbackQuery):
         score_board.append(f"{usr}: {pts}")
     score_text = "\n".join(score_board)
     
-    task_text = f"{score_text}\n\nЗавдання: {target_round}\n\nЗнайди і сфотографуй число {target_round}."
+    # Точкове налаштування правила при обнуленні
+    if target_round == 1:
+        task_instruction = "сфотографуй число 1."
+    else:
+        task_instruction = f"число {target_round}"
+        
+    task_text = f"Раунд {target_round}.\n\n{score_text}\n\nЗавдання: {task_instruction}"
+    
     builder = InlineKeyboardBuilder()
     if target_round > 1:
         builder.button(text=f"ОБНУЛИТИ РАУНД {target_round-1}", callback_data=f"undo_{target_round-1}")
