@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request, Response, status
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ChatType, ChatMemberStatus
 from aiogram.filters import Command, ChatMemberUpdatedFilter
-from aiogram.filters.chat_member_updated import JOIN_TRANSITION, LEAVE_TRANSITION
+from aiogram.filters.chat_member_updated import JOIN_TRANSITION, LEAVE_TRANSITION, IS_NOT_MEMBER, IS_MEMBER, IS_ADMIN
 from aiogram.types import ChatMemberUpdated
 from aiogram.exceptions import TelegramAPIError
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -139,7 +139,7 @@ async def evaluate_and_send_post(chat_id: int, trigger_user_id: Optional[int] = 
             "2. Безоплатна гра триває 10 раундів, платна – 100 раундів. 1 раунд = 1 photo.\n"
             "За кожне photo гравець отримує 1 бал.\n\n"
             "3. Числа не можна створювати (викладати предметами) або писати самому.\n"
-            "Лише фотографувати їх вдома, на вулиці тощо.\n\n"
+            "Лише photoграфувати їх вдома, на вулиці тощо.\n\n"
             "4. Не можна брати двічі числа з однієї локації (номери сторінок у книзі, кнопки в ліфті тощо).\n"
             "Локації мають бути різними.\n\n"
             "5. Якщо надіслане foto не відповідає правилам, це foto можна відмінити і почати раунд заново.\n"
@@ -153,21 +153,25 @@ async def evaluate_and_send_post(chat_id: int, trigger_user_id: Optional[int] = 
 
 # --- Обробники для Групових чатів ---
 
-# Відстеження події додавання самого БОТА в групу/супергрупу за допомогою магічного фільтра F
+# Відстеження події додавання самого БОТА в групу/супергрупу за допомогою офіційного ChatMemberUpdatedFilter
 @dp.my_chat_member(
-    F.new_chat_member.status.in_({ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR})
+    ChatMemberUpdatedFilter.member_status_changed(
+        old_status=IS_NOT_MEMBER,
+        new_status=IS_MEMBER | IS_ADMIN
+    )
 )
 async def bot_added_to_group(event: ChatMemberUpdated):
     if event.chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
         await evaluate_and_send_post(event.chat.id, trigger_user_id=event.from_user.id)
 
-# Моніторинг входу/виходу КОРИСТУВАЧІВ за допомогою магічних фільтрів F
-@dp.chat_member(F.new_chat_member.status == ChatMemberStatus.MEMBER)
+# Моніторинг входу КОРИСТУВАЧІВ за допомогою JOIN_TRANSITION
+@dp.chat_member(ChatMemberUpdatedFilter.member_status_changed(JOIN_TRANSITION))
 async def user_joined_group(event: ChatMemberUpdated):
     if event.chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
         logger.info(f"Користувач {event.new_chat_member.user.id} зайшов у групу {event.chat.id}")
 
-@dp.chat_member(F.new_chat_member.status.in_({ChatMemberStatus.LEFT, ChatMemberStatus.KICKED}))
+# Моніторинг виходу КОРИСТУВАЧІВ за допомогою LEAVE_TRANSITION
+@dp.chat_member(ChatMemberUpdatedFilter.member_status_changed(LEAVE_TRANSITION))
 async def user_left_group(event: ChatMemberUpdated):
     if event.chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
         logger.info(f"Користувач {event.old_chat_member.user.id} покинув групу {event.chat.id}")
@@ -391,13 +395,21 @@ async def private_stub_response(message: types.Message):
 async def lifespan(app: FastAPI):
     await init_db_pool()
     web_url = f"{BASE_URL}/webhook"
-    await bot.set_webhook(url=web_url, drop_pending_updates=True)
-    logger.info(f"Вебхук підключено до: {web_url}")
+    try:
+        await bot.set_webhook(url=web_url, drop_pending_updates=True)
+        logger.info(f"Вебхук підключено до: {web_url}")
+    except Exception as e:
+        logger.error(f"Помилка встановлення вебхуку під час запуску: {e}")
     yield
-    await bot.delete_webhook()
+    try:
+        await bot.delete_webhook()
+        logger.info("Вебхук видалено.")
+    except Exception as e:
+        logger.error(f"Помилка видалення вебхуку: {e}")
+        
     if db_pool:
         await db_pool.close()
-    logger.info("Вебхук видалено, сесії закрито.")
+    logger.info("Сесії бази даних закрито.")
 
 app = FastAPI(lifespan=lifespan)
 
