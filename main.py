@@ -135,7 +135,7 @@ async def evaluate_and_send_post(chat_id: int, trigger_user_id: Optional[int] = 
             "Правила гри:\n\n"
             "1. Завдання гравців – фотографувати числа (1, 2, 3) і надсилати у цей чат.\n"
             "2. Безоплатна гра триває 10 раундів, платна – 100 раундів. 1 раунд = 1 photo.\n"
-            "За кожне фото гравець отримує 1 бал.\n\n"
+            "За кожне photo гравець отримує 1 бал.\n\n"
             "3. Числа не можна створювати (викладати предметами) або писати самому.\n"
             "Лише фотографувати їх вдома, на вулиці тощо.\n\n"
             "4. Не можна брати двічі числа з однієї локації (номери сторінок у книзі, кнопки в ліфті тощо).\n"
@@ -151,7 +151,8 @@ async def evaluate_and_send_post(chat_id: int, trigger_user_id: Optional[int] = 
 
 # --- Обробники для Групових чатів ---
 
-@dp.my_chat_member(ChatMemberUpdatedFilter(member_change=JOIN_TRANSITION))
+# ВИПРАВЛЕНО: Змінено параметр member_change на member_id_change
+@dp.my_chat_member(ChatMemberUpdatedFilter(member_id_change=JOIN_TRANSITION))
 async def bot_added_to_group(event: types.ChatMemberUpdated):
     if event.chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
         await evaluate_and_send_post(event.chat.id, trigger_user_id=event.from_user.id)
