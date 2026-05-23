@@ -79,14 +79,14 @@ async def load_game(chat_id: int):
                 "status": row["status"],
                 "round_number": row["round_number"],
                 "players": json.loads(row["players"]) if isinstance(row["players"], str) else row["players"],
-                "current_word_data": json.loads(row["current_word_data"]) if row["current_word_data"] else None
+                "current_word_data": json.loads(row["current_word_data"]) if row["current_word_data"] else {}
             }
         return None
 
 async def save_game(chat_id: int, status: str, round_number: int, players: dict, current_word_data: dict = None):
     pool = await get_db_connection()
     players_json = json.dumps(players)
-    current_word_json = json.dumps(current_word_data) if current_word_data else None
+    current_word_json = json.dumps(current_word_data) if current_word_data else "{}"
     
     async with pool.acquire() as conn:
         await conn.execute('''
@@ -137,20 +137,48 @@ async def get_chat_players_count(chat_id: int) -> int:
         logger.error(f"Помилка отримання кількості учасників: {e}")
         return 0
 
-# Нова функція фільтрації гравців, які залишили групу
-async def filter_active_players(chat_id: int, players: dict) -> dict:
+# Фільтрація гравців із фіксацією змін у складі групи
+async def filter_active_players(chat_id: int, players: dict, current_word_data: dict) -> (dict, dict):
     active_players = {}
+    was_changed = False
     for p_id, p_info in players.items():
         try:
             member = await bot.get_chat_member(chat_id=chat_id, user_id=int(p_id))
             if member.status not in ["left", "kicked"]:
                 active_players[p_id] = p_info
+            else:
+                was_changed = True
         except Exception:
-            # Якщо виникла помилка (наприклад, бот не може перевірити), про всяк випадок залишаємо гравця
             active_players[p_id] = p_info
-    return active_players
+            
+    if was_changed:
+        if not current_word_data:
+            current_word_data = {}
+        current_word_data["composition_changed"] = True
+        
+    return active_players, current_word_data
 
-# Helper для формування стартового списку відомих боту гравців
+# Функція залізобетонної перевірки на одну людину в чаті для кнопок
+async def check_and_handle_alone(chat_id: int, callback: types.CallbackQuery = None) -> bool:
+    count = await get_chat_players_count(chat_id)
+    actual_humans = count - 1 if count > 0 else 1
+    
+    if actual_humans < 2:
+        text = (
+            "Щоб грати, додайте в групу другого гравця.\n\n"
+            "Щоб перезапустити бота, напишіть в чат команду /start або /play."
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="НОВА ГРА ДО 10", callback_data="start_free_10")]
+        ])
+        if callback:
+            await callback.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+            await callback.answer()
+        else:
+            await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+        return True
+    return False
+
 def generate_initial_scoreboard(players: dict) -> str:
     if not players:
         return "player 1: 0\nplayer 2: 0"
@@ -258,14 +286,14 @@ async def manual_start_in_group(message: types.Message):
         
         existing_game = await load_game(chat_id)
         players = existing_game["players"] if existing_game and "players" in existing_game else {}
+        current_word_data = existing_game["current_word_data"] if existing_game and "current_word_data" in existing_game else {}
         
-        # Перевіряємо актуальність складу групи при виклику /start
-        players = await filter_active_players(chat_id, players)
+        players, current_word_data = await filter_active_players(chat_id, players, current_word_data)
         
         for p_id in players:
             players[p_id]["score"] = 0
             
-        await save_game(chat_id, "registration", 0, players)
+        await save_game(chat_id, "registration", 0, players, current_word_data)
         await show_rules_or_limits(chat_id)
 
 async def show_rules_or_limits(chat_id: int):
@@ -294,13 +322,14 @@ async def show_rules_or_limits(chat_id: int):
         await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
         return
 
+    # ОНОВЛЕНИЙ ПОСТ "ПРАВИЛА"
     text = (
         "Правила гри:\n\n"
         "1. Завдання гравців – фотати числа (1, 2, 3) і надсилати у цей чат. Хто перший – отримує 1 бал.\n\n"
-        "2. Кожен раунд = 1 photo = 1 бал. Безоплатна гра триває 10 раундів, платна – 100.\n\n"
-        "3. Числа не можна створювати (викладати предметами) або писати самому. Лише фотати їх вдома, на вулиці тощо.\n\n"
-        "4. Не беріть двічі числа з однієї локації (номери у книзі, кнопки ліфту тощо). Локації мають бути різними.\n\n"
-        "5. Якщо надіслане foto не відповідає завданню, його можна відмінити і почати раунд заново.\n\n"
+        "2. Кожен раунд = 1 фото = 1 бал. Безоплатна гра триває 10 раундів, платна – 100.\n\n"
+        "3. Числа не можна викладати предметами чи писати самому. Можна лише фотати їх вдома, на вулиці тощо.\n\n"
+        "4. Не беріть двічі числа з однієї локації (сторінки книги, кнопки ліфту тощо). Локації мають быть різними.\n\n"
+        "5. Якщо надіслане фото не відповідає завданню, його можна відмінити і почати раунд заново.\n\n"
         "Щоб перезапустити бота, напишіть /start або /play.\n\n"
         "Придумайте приз і гоу!"
     )
@@ -321,17 +350,21 @@ async def show_rules_or_limits(chat_id: int):
 @dp.callback_query(F.data == "start_free_10")
 async def start_free_game(callback: types.CallbackQuery):
     chat_id = callback.message.chat.id
+    
+    # Залізобетонна перевірка кількості учасників
+    if await check_and_handle_alone(chat_id, callback):
+        return
+        
     game = await load_game(chat_id)
-    
     players = game["players"] if game and "players" in game else {}
+    current_word_data = game["current_word_data"] if game and "current_word_data" in game else {}
     
-    # Фільтруємо вийшовших гравців перед початком нової гри
-    players = await filter_active_players(chat_id, players)
+    players, current_word_data = await filter_active_players(chat_id, players, current_word_data)
     
     for p_id in players:
         players[p_id]["score"] = 0
         
-    current_word_data = {"number": 1}
+    current_word_data["number"] = 1
     await save_game(chat_id, "playing_free", 1, players, current_word_data)
     
     scoreboard = generate_initial_scoreboard(players)
@@ -351,17 +384,20 @@ async def start_free_game(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "start_pro_game_active")
 async def start_pro_game_active(callback: types.CallbackQuery):
     chat_id = callback.message.chat.id
+    
+    if await check_and_handle_alone(chat_id, callback):
+        return
+        
     game = await load_game(chat_id)
-    
     players = game["players"] if game and "players" in game else {}
+    current_word_data = game["current_word_data"] if game and "current_word_data" in game else {}
     
-    # Фільтруємо вийшовших гравців перед початком нової гри
-    players = await filter_active_players(chat_id, players)
+    players, current_word_data = await filter_active_players(chat_id, players, current_word_data)
     
     for p_id in players:
         players[p_id]["score"] = 0
         
-    current_word_data = {"number": 1}
+    current_word_data["number"] = 1
     await save_game(chat_id, "playing_pro", 1, players, current_word_data)
     
     scoreboard = generate_initial_scoreboard(players)
@@ -383,17 +419,20 @@ async def show_pro_payment(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     chat_id = callback.message.chat.id
     
+    if await check_and_handle_alone(chat_id, callback):
+        return
+        
     if await is_user_pro(user_id):
         game = await load_game(chat_id)
         players = game["players"] if game and "players" in game else {}
+        current_word_data = game["current_word_data"] if game and "current_word_data" in game else {}
         
-        # Фільтруємо вийшовших гравців перед початком нової гри
-        players = await filter_active_players(chat_id, players)
+        players, current_word_data = await filter_active_players(chat_id, players, current_word_data)
         
         for p_id in players:
             players[p_id]["score"] = 0
             
-        current_word_data = {"number": 1}
+        current_word_data["number"] = 1
         await save_game(chat_id, "playing_pro", 1, players, current_word_data)
         
         scoreboard = generate_initial_scoreboard(players)
@@ -428,8 +467,11 @@ async def show_pro_payment(callback: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("clear_round_"))
 async def clear_round_handler(callback: types.CallbackQuery):
     chat_id = callback.message.chat.id
-    game = await load_game(chat_id)
     
+    if await check_and_handle_alone(chat_id, callback):
+        return
+        
+    game = await load_game(chat_id)
     if not game or game["status"] not in ["playing_free", "playing_pro", "finished"]:
         await callback.answer()
         return
@@ -444,12 +486,11 @@ async def clear_round_handler(callback: types.CallbackQuery):
         target_round = 1
 
     players = game["players"]
+    current_word_data = game["current_word_data"] if game and "current_word_data" in game else {}
     
-    # Також робимо перевірку при скасуванні раунду
-    players = await filter_active_players(chat_id, players)
+    players, current_word_data = await filter_active_players(chat_id, players, current_word_data)
     
     user_id_to_decrement = str(callback.from_user.id)
-
     if user_id_to_decrement in players:
         if players[user_id_to_decrement]["score"] > 0:
             players[user_id_to_decrement]["score"] -= 1
@@ -461,7 +502,7 @@ async def clear_round_handler(callback: types.CallbackQuery):
     else:
         current_status = "playing_pro" if game["status"] == "playing_pro" else "playing_free"
 
-    current_word_data = {"number": target_round}
+    current_word_data["number"] = target_round
     await save_game(chat_id, current_status, target_round, players, current_word_data)
     
     lines = [f"{p['name']}: {p['score']}" for p in players.values()]
@@ -518,9 +559,10 @@ async def handle_game_photo(message: types.Message):
 
     round_num = game["round_number"]
     players = game["players"]
+    current_word_data = game["current_word_data"] if game and "current_word_data" in game else {}
     
-    # ОБЕРЕЖНИЙ ФІЛЬТР: видаляємо тих, кого немає в чаті, перед підрахунком балів за фото
-    players = await filter_active_players(chat_id, players)
+    # Фільтруємо вибулих учасників та фіксуємо зміни
+    players, current_word_data = await filter_active_players(chat_id, players, current_word_data)
     
     user_id = str(message.from_user.id)
     u_name = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
@@ -541,11 +583,12 @@ async def handle_game_photo(message: types.Message):
                 await message.reply(text, reply_markup=kb)
                 return
 
+    # Якщо фото надіслав новий гравець, якого не було в списку — склад групи змінився!
     if user_id not in players:
+        current_word_data["composition_changed"] = True
         players[user_id] = {"name": u_name, "score": 0}
         
     players[user_id]["score"] += 1
-    
     max_rounds = 10 if game["status"] == "playing_free" else 100
     
     if round_num >= max_rounds:
@@ -579,12 +622,20 @@ async def handle_game_photo(message: types.Message):
                 [InlineKeyboardButton(text="НОВА ГРА", callback_data="start_pro_game_active")]
             ])
             
-        await save_game(chat_id, "finished", round_num, players, game["current_word_data"])
+        # ПЕРЕВІРКА СКЛАДУ ГРУПИ НА КІНЕЦЬ ГРИ:
+        # Якщо прапорець змін True — примусово скидаємо стан на "registration"
+        if current_word_data.get("composition_changed"):
+            next_status = "registration"
+            current_word_data = {}  # Очищуємо прапорці
+        else:
+            next_status = "finished"
+            
+        await save_game(chat_id, next_status, round_num, players, current_word_data)
         await message.answer(text, reply_markup=kb)
         return
 
     next_round = round_num + 1
-    current_word_data = {"number": next_round}
+    current_word_data["number"] = next_round
     await save_game(chat_id, game["status"], next_round, players, current_word_data)
 
     lines = [f"{p['name']}: {p['score']}" for p in players.values()]
