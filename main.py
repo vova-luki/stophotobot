@@ -142,7 +142,7 @@ async def get_chat_players_count(chat_id: int) -> int:
 # ==========================================
 
 # КЕРУВАННЯ СТАТУСОМ АДМІНІСТРАТОРА (ЛИШЕ В ОСОБИСТИХ ПОВІДОМЛЕННЯХ)
-@dp.message(F.chat.type == "private" & Command("free", "pro"))
+@dp.message(F.chat.type == "private", Command("free", "pro"))
 async def toggle_admin_status(message: types.Message):
     if message.from_user.id == ADMIN_ID:
         command = message.text.split()[0].replace("/", "").lower()
