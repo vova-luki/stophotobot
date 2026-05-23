@@ -15,7 +15,7 @@ import asyncpg
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Зчитування змінних оточення (Токен береться з Render безпечно)
+# Зчитування змінних оточення
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BASE_URL = os.getenv("BASE_URL")
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -94,7 +94,7 @@ async def save_game(chat_id: int, status: str, round_number: int, players: dict,
             VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (chat_id) 
             DO UPDATE SET status = $2, round_number = $3, players = $4, current_word_data = $5
-        ''', chat_id, status, round_number, players_json, current_word_json)  # ВИПРАВЛЕНО: current_word_json замість помилкового current_json
+        ''', chat_id, status, round_number, players_json, current_word_json)
 
 async def is_user_pro(user_id: int) -> bool:
     pool = await get_db_connection()
@@ -141,7 +141,6 @@ async def get_chat_players_count(chat_id: int) -> int:
 # ЛОГІКА ХЕНДЛЕРІВ
 # ==========================================
 
-# КЕРУВАННЯ СТАТУСОМ АДМІНІСТРАТОРА (ЛИШЕ В ОСОБИСТИХ ПОВІДОМЛЕННЯХ)
 @dp.message(F.chat.type == "private", Command("free", "pro"))
 async def toggle_admin_status(message: types.Message):
     if message.from_user.id == ADMIN_ID:
@@ -217,7 +216,6 @@ async def admin_stat(message: types.Message):
 async def private_stub(message: types.Message):
     if message.from_user.id == ADMIN_ID and (message.text.startswith("/stat") or message.text.startswith("/free") or message.text.startswith("/pro")):
         return
-    # Оновлено лінк на новий юзернейм @stofotobot
     text = (
         "Щоб грати, додай мене у групу з іншими людьми (не в особисті чати, а саме у групу).\n\n"
         "Знайдеш мене через пошук – @stofotobot"
@@ -263,18 +261,16 @@ async def show_rules_or_limits(chat_id: int):
         await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
         return
 
-    # Оновлено назву на 100 ФОТО та посилання на новий лінк бота
+    # Нові правила строго з твого документу
     text = (
-        "Вітаємо у <a href=\"https://t.me/stofotobot\">100 ФОТО</a>!\n\n"
         "Правила гри:\n\n"
-        "1. Завдання гравців – фотогравувати числа (1, 2, 3) і надсилати у цей чат. 1 раунд = 1 photo.\n\n"
-        "2. За кожне фото гравець отримує 1 бал. Безоплатна гра триває 10 раундів, платна – 100 раундів.\n\n"
+        "1. Завдання гравців – фотогравувати числа (1, 2, 3) і надсилати у цей чат. Хто надіслав перший – отримує 1 бал.\n\n"
+        "2. Кожен 1 раунд = 1 фото = 1 бал. Безоплатна гра триває 10 раундів, платна – 100 раундів.\n\n"
         "3. Числа не можна створювати (викладати предметами) або писати самому. Лише фотогравувати їх вдома, на вулиці тощо.\n\n"
-        "4. Не можна брати двічі числа з однієї локації (номери сторінок у книзі, кнопки в ліфті тощо). Локації мають бути різними.\n\n"
-        "5. Якщо надіслане foto не відповідає правилам, це фото можна відмінити і почати раунд заново.\n\n"
-        "Щоб перезапустити бота, напишіть у чат команду /start або /play.\n\n"
-        "За бажанням, придумайте приз переможцю.\n\n"
-        "Натхнення!"
+        "4. Не беріть двічі числа з однієї локації (номери сторінок у книзі, кнопки в ліфті тощо). Локації мають бути різними.\n\n"
+        "5. Якщо надіслане фото не відповідає завданню раунду, його можна відмінити і почати раунд заново.\n\n"
+        "Щоб перезапустити бота, напишіть команду /start або /play.\n\n"
+        "За бажанням, придумайте приз переможцю."
     )
 
     if await check_group_has_pro(chat_id):
@@ -298,13 +294,18 @@ async def start_free_game(callback: types.CallbackQuery):
     await save_game(chat_id, "playing_free", 1, players, current_word_data)
     
     text = (
-        "Раунд 1.\n\n"
+        "100 ФОТО\n"
+        "Раунд 1\n\n"
         "Рахунок\n"
         "player 1: 0\n"
         "player 2: 0\n\n"
         "Завдання: сфотографуй число 1."
     )
-    await callback.bot.send_message(chat_id=chat_id, text=text, reply_markup=None)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="ОБНУЛИТИ РАУНД 1", callback_data="clear_round_1")],
+        [InlineKeyboardButton(text="НОВА ГРА ДО 10", callback_data="start_free_10")]
+    ])
+    await callback.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
     await callback.answer()
 
 @dp.callback_query(F.data == "start_pro_game_active")
@@ -315,6 +316,7 @@ async def start_pro_game_active(callback: types.CallbackQuery):
     await save_game(chat_id, "playing_pro", 1, players, current_word_data)
     
     text = (
+        "100 ФОТО\n"
         "Раунд 1.\n\n"
         "Рахунок\n"
         "player 1: 0\n"
@@ -323,7 +325,11 @@ async def start_pro_game_active(callback: types.CallbackQuery):
         "player N: 0\n\n"
         "Завдання: cфотографуй число 1."
     )
-    await callback.bot.send_message(chat_id=chat_id, text=text, reply_markup=None)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="ОБНУЛИТИ РАУНД 1", callback_data="clear_round_1")],
+        [InlineKeyboardButton(text="НОВА ГРА", callback_data="start_pro_game_active")]
+    ])
+    await callback.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
     await callback.answer()
 
 @dp.callback_query(F.data == "start_pro_buy")
@@ -336,6 +342,7 @@ async def show_pro_payment(callback: types.CallbackQuery):
         current_word_data = {"number": 1}
         await save_game(chat_id, "playing_pro", 1, players, current_word_data)
         text = (
+            "100 ФОТО\n"
             "Раунд 1.\n\n"
             "Рахунок\n"
             "player 1: 0\n"
@@ -344,7 +351,11 @@ async def show_pro_payment(callback: types.CallbackQuery):
             "player N: 0\n\n"
             "Завдання: cфотографуй число 1."
         )
-        await callback.bot.send_message(chat_id=chat_id, text=text, reply_markup=None)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="ОБНУЛИТИ РАУНД 1", callback_data="clear_round_1")],
+            [InlineKeyboardButton(text="НОВА ГРА", callback_data="start_pro_game_active")]
+        ])
+        await callback.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
         await callback.answer()
         return
 
@@ -381,6 +392,13 @@ async def clear_round_handler(callback: types.CallbackQuery):
         target_round = 1
 
     players = game["players"]
+    user_id_to_decrement = str(callback.from_user.id)
+
+    # Знімаємо 1 бал у того, хто натиснув кнопку скасування (якщо він є у списку гравців)
+    if user_id_to_decrement in players:
+        if players[user_id_to_decrement]["score"] > 0:
+            players[user_id_to_decrement]["score"] -= 1
+
     current_word_data = {"number": target_round}
     await save_game(chat_id, game["status"], target_round, players, current_word_data)
     
@@ -391,29 +409,31 @@ async def clear_round_handler(callback: types.CallbackQuery):
     
     if game["status"] == "playing_free":
         text = (
+            "100 ФОТО\n"
             f"Раунд {target_round}\n\n"
             f"Рахунок\n"
             f"{scoreboard}\n\n"
-            f"Завдання: число {target_round}"
+            f"Завдання: сфотографуй число {target_round}."
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"ОБНУЛИТИ РАУНД {target_round - 1}", callback_data=f"clear_round_{target_round - 1}")],
+            [InlineKeyboardButton(text=f"ОБНУЛИТИ РАУНД {target_round}", callback_data=f"clear_round_{target_round}")],
             [InlineKeyboardButton(text="НОВА ГРА ДО 10", callback_data="start_free_10")]
         ])
     else:
         text = (
+            "100 ФОТО\n"
             f"Раунд {target_round}.\n\n"
             f"Рахунок\n"
             f"{scoreboard}\n\n"
-            f"Завдання: число {target_round}"
+            f"Завдання: cфотографуй число {target_round}."
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"ОБНУЛИТИ РАУНД {target_round - 1}", callback_data=f"clear_round_{target_round - 1}")],
+            [InlineKeyboardButton(text=f"ОБНУЛИТИ РАУНД {target_round}", callback_data=f"clear_round_{target_round}")],
             [InlineKeyboardButton(text="НОВА ГРА", callback_data="start_pro_game_active")]
         ])
         
     await callback.message.answer(text=text, reply_markup=kb)
-    await callback.answer("Раунд скинуто!")
+    await callback.answer("Раунд відмінено, бал знято!")
 
 @dp.message(F.chat.type.in_(["group", "supergroup"]) & F.photo)
 async def handle_game_photo(message: types.Message):
@@ -497,10 +517,11 @@ async def handle_game_photo(message: types.Message):
     
     if game["status"] == "playing_free":
         text = (
+            "100 ФОТО\n"
             f"Раунд {next_round}\n\n"
             f"Рахунок\n"
             f"{scoreboard}\n\n"
-            f"Завдання: число {next_round}"
+            f"Завдання: сфотографуй число {next_round}."
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=f"ОБНУЛИТИ РАУНД {next_round - 1}", callback_data=f"clear_round_{next_round - 1}")],
@@ -508,10 +529,11 @@ async def handle_game_photo(message: types.Message):
         ])
     else:
         text = (
+            "100 ФОТО\n"
             f"Раунд {next_round}.\n\n"
             f"Рахунок\n"
             f"{scoreboard}\n\n"
-            f"Завдання: число {next_round}"
+            f"Завдання: cфотографуй число {next_round}."
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=f"ОБНУЛИТИ РАУНД {next_round - 1}", callback_data=f"clear_round_{next_round - 1}")],
