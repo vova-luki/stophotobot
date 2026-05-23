@@ -137,6 +137,19 @@ async def get_chat_players_count(chat_id: int) -> int:
         logger.error(f"Помилка отримання кількості учасників: {e}")
         return 0
 
+# Нова функція фільтрації гравців, які залишили групу
+async def filter_active_players(chat_id: int, players: dict) -> dict:
+    active_players = {}
+    for p_id, p_info in players.items():
+        try:
+            member = await bot.get_chat_member(chat_id=chat_id, user_id=int(p_id))
+            if member.status not in ["left", "kicked"]:
+                active_players[p_id] = p_info
+        except Exception:
+            # Якщо виникла помилка (наприклад, бот не може перевірити), про всяк випадок залишаємо гравця
+            active_players[p_id] = p_info
+    return active_players
+
 # Helper для формування стартового списку відомих боту гравців
 def generate_initial_scoreboard(players: dict) -> str:
     if not players:
@@ -243,11 +256,12 @@ async def manual_start_in_group(message: types.Message):
     if message.chat.type in ["group", "supergroup"]:
         chat_id = message.chat.id
         
-        # ОБЕРЕЖНЕ ВИПРАВЛЕННЯ: Замість затирання в {}, перевіряємо, чи є вже гравці у базі
         existing_game = await load_game(chat_id)
         players = existing_game["players"] if existing_game and "players" in existing_game else {}
         
-        # Обнуляємо бали існуючим гравцям, щоб при натисканні кнопки вони не перенеслися у нову гру
+        # Перевіряємо актуальність складу групи при виклику /start
+        players = await filter_active_players(chat_id, players)
+        
         for p_id in players:
             players[p_id]["score"] = 0
             
@@ -310,6 +324,10 @@ async def start_free_game(callback: types.CallbackQuery):
     game = await load_game(chat_id)
     
     players = game["players"] if game and "players" in game else {}
+    
+    # Фільтруємо вийшовших гравців перед початком нової гри
+    players = await filter_active_players(chat_id, players)
+    
     for p_id in players:
         players[p_id]["score"] = 0
         
@@ -336,6 +354,10 @@ async def start_pro_game_active(callback: types.CallbackQuery):
     game = await load_game(chat_id)
     
     players = game["players"] if game and "players" in game else {}
+    
+    # Фільтруємо вийшовших гравців перед початком нової гри
+    players = await filter_active_players(chat_id, players)
+    
     for p_id in players:
         players[p_id]["score"] = 0
         
@@ -364,6 +386,10 @@ async def show_pro_payment(callback: types.CallbackQuery):
     if await is_user_pro(user_id):
         game = await load_game(chat_id)
         players = game["players"] if game and "players" in game else {}
+        
+        # Фільтруємо вийшовших гравців перед початком нової гри
+        players = await filter_active_players(chat_id, players)
+        
         for p_id in players:
             players[p_id]["score"] = 0
             
@@ -418,6 +444,10 @@ async def clear_round_handler(callback: types.CallbackQuery):
         target_round = 1
 
     players = game["players"]
+    
+    # Також робимо перевірку при скасуванні раунду
+    players = await filter_active_players(chat_id, players)
+    
     user_id_to_decrement = str(callback.from_user.id)
 
     if user_id_to_decrement in players:
@@ -488,6 +518,10 @@ async def handle_game_photo(message: types.Message):
 
     round_num = game["round_number"]
     players = game["players"]
+    
+    # ОБЕРЕЖНИЙ ФІЛЬТР: видаляємо тих, кого немає в чаті, перед підрахунком балів за фото
+    players = await filter_active_players(chat_id, players)
+    
     user_id = str(message.from_user.id)
     u_name = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
 
