@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.client.default import DefaultBotProperties
-from aiogram.filters import Command, ChatMemberUpdatedFilter, JOIN_TRANSITION
+from aiogram.filters import Command, ChatMemberUpdatedFilter, JOIN_TRANSITION, IS_MEMBER, LEFT_MEMBER
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 import asyncpg
 
@@ -52,7 +52,6 @@ async def get_db_connection():
 async def init_db():
     pool = await get_db_connection()
     async with pool.acquire() as conn:
-        # Створення таблиць, якщо їх немає
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS games (
                 chat_id BIGINT PRIMARY KEY,
@@ -72,7 +71,6 @@ async def init_db():
             );
         ''')
         
-        # Автоматичний апгрейд структури для база на Supabase
         await conn.execute('''
             ALTER TABLE games ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
         ''')
@@ -83,7 +81,6 @@ async def init_db():
             ALTER TABLE pro_users ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
         ''')
         
-        # Заповнюємо порожні значення created_at для старих записів, щоб працювала статистика
         await conn.execute('''
             UPDATE games SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL;
         ''')
@@ -250,7 +247,6 @@ async def get_db_stats_isolated(pool, dt=None):
         users = await conn.fetchval(sql_users, *params)
         pro = await conn.fetchval(sql_pro, *params)
         
-        # Надійна підстраховка: якщо значень немає (база пуста), повертаємо 0
         chats = chats if chats is not None else 0
         games_10 = games_10 if games_10 is not None else 0
         games_100 = games_100 if games_100 is not None else 0
@@ -334,11 +330,9 @@ async def admin_stat(message: types.Message):
 
 @dp.message(F.chat.type == "private")
 async def private_stub(message: types.Message):
-    # Повне блокування будь-яких повідомлень, тексту чи старту в приваті, якщо пише адмін
     if message.from_user.id == ADMIN_ID:
         return
         
-    # Для всіх інших користувачів видається чітка текстова заглушка
     text = "Щоб грати, додай мене у групу з іншими людьми (не в особисті чати, а саме у групу). Знайдеш мене по пошуку @stofotobot"
     await message.answer(text)
 
@@ -352,6 +346,19 @@ async def bot_added_to_group(event: types.ChatMemberUpdated):
         await show_rules_or_limits(chat_id)
     except Exception as e:
         logger.error(f"Помилка відображення правил при додаванні: {e}")
+
+# Хендлер, який реагує на зміну складу групи (коли користувачі додають нових людей)
+@dp.chat_member(ChatMemberUpdatedFilter(member_status_changed=IS_MEMBER))
+async def user_added_to_group(event: types.ChatMemberUpdated):
+    chat_id = event.chat.id
+    game = await load_game(chat_id)
+    
+    # Реагуємо на додавання нових людей лише на етапі реєстрації/перевірки лімітів
+    if not game or game["status"] == "registration":
+        try:
+            await show_rules_or_limits(chat_id)
+        except Exception as e:
+            logger.error(f"Помилка перевірки лімітів при додаванні юзера: {e}")
 
 @dp.message(Command("start", "play"))
 async def manual_start_in_group(message: types.Message):
@@ -378,24 +385,57 @@ async def show_rules_or_limits(chat_id: int):
     actual_humans = count - 1 if count > 0 else 1
     has_pro = await check_group_has_pro(chat_id)
 
+    # Перевірка лімітів кількості людей відповідно до файлу текстів
     if has_pro:
         if actual_humans == 1:
-            await bot.send_message(chat_id=chat_id, text="1 людина в групі")
+            text = (
+                "Щоб грати, додайте в групу другого гравця.\n\n"
+                "Щоб перезапустити бота, напишіть в чат команду /start або /play."
+            )
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="НОВА ГРА ДО 10", callback_data="start_free_10")]
+            ])
+            await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
             return
         elif actual_humans > 10:
-            await bot.send_message(chat_id=chat_id, text="11 людей в групі")
+            text = (
+                "На жаль, грати може максимум 10 гравців.\n\n"
+                "Щоб перезапустити бота, напишіть в чат команду /start або /play."
+            )
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="НАС ВЖЕ 10", callback_data="noop")]
+            ])
+            await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
             return
     else:
         if actual_humans == 1:
-            await bot.send_message(chat_id=chat_id, text="1 людина в групі")
+            text = (
+                "Щоб грати, додайте в групу другого гравця.\n\n"
+                "Щоб перезапустити бота, напишіть в чат команду /start або /play."
+            )
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="НОВА ГРА ДО 10", callback_data="start_free_10")]
+            ])
+            await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
             return
         elif actual_humans >= 3:
-            await bot.send_message(chat_id=chat_id, text="3 людини в групі")
+            text = (
+                "Щоб грати втрьох і більше, хоча б 1 гравець має бути Pro.\n\n"
+                "Pro-версія гри:\n"
+                "- до 10 гравців\n"
+                "- до 100 раундів назавжди\n"
+                "- у всіх чатах Pro-гравця"
+            )
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="КУПИТИ PRO-ВЕРСІЮ", callback_data="start_pro_buy")]
+            ])
+            await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
             return
 
+    # Якщо перевірки лімітів пройдені — надсилаємо чисті правила з правильними кнопками
     text = (
         "Правила гри:\n\n"
-        "1. Завдання гравців – фотографувати числа (1, 2, 3) і надсилати у чат. Хто перший – отримує 1 бал.\n\n"
+        "1. Завдання гравців – photoграфувати числа (1, 2, 3) і надсилати у чат. Хто перший – отримує 1 бал.\n\n"
         "2. Кожен раунд = 1 photo / 1 бал. Безоплатна гра триває 10 раундів, платна – 100.\n\n"
         "3. Не можна викладати числа предметами чи писати самому. Можна лише фотографувати їх вдома, на вулиці тощо.\n\n"
         "4. Не можна брати двічі числа з однієї локації (сторінки книги, кнопки ліфту тощо). Локації мають бути різними.\n\n"
