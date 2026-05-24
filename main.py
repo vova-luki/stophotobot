@@ -212,6 +212,47 @@ def generate_initial_scoreboard(players: dict) -> str:
         lines.append("player 2: 0")
     return "\n".join(lines)
 
+async def send_current_round_post(chat_id: int, game: dict):
+    round_num = game["round_number"]
+    players = game["players"]
+    status = game["status"]
+    
+    lines = [f"{p['name']}: {p['score']}" for p in players.values()]
+    if len(lines) == 0:
+        scoreboard = "player 1: 0\nplayer 2: 0"
+    elif len(lines) == 1:
+        scoreboard = f"{lines[0]}\nplayer 2: 0"
+    else:
+        scoreboard = "\n".join(lines)
+        
+    if round_num == 1:
+        text = (
+            f"Раунд 1.\n\n"
+            f"Рахунок\n"
+            f"{scoreboard}\n\n"
+            f"Завдання: сфотографуй число 1."
+        )
+    else:
+        text = (
+            f"Раунд {round_num}\n\n"
+            f"Рахунок\n"
+            f"{scoreboard}\n\n"
+            f"Завдання: число {round_num}"
+        )
+        
+    if status == "playing_free" or round_num == 1:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            *([[InlineKeyboardButton(text=f"ОБНУЛИТИ РАУНД {round_num - 1}", callback_data=f"clear_round_{round_num - 1}")] if round_num > 1 else []),
+            [InlineKeyboardButton(text="НОВА ГРА ДО 10", callback_data="start_free_10")]
+        ])
+    else:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"ОБНУЛИТИ РАУНД {round_num - 1}", callback_data=f"clear_round_{round_num - 1}")],
+            [InlineKeyboardButton(text="НОВА ГРА", callback_data="start_pro_game_active")]
+        ])
+        
+    await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+
 async def get_db_stats_isolated(pool, dt=None):
     time_filter = "AND created_at >= $1" if dt else ""
     params = [dt] if dt else []
@@ -226,18 +267,19 @@ async def get_db_stats_isolated(pool, dt=None):
     sql_games_10 = f"SELECT COUNT(*) FROM games WHERE (status='playing_free' OR (status='finished' AND round_number=10) OR (status='registration' AND round_number=0)) AND {not_only_admin_filter} {time_filter}"
     sql_games_100 = f"SELECT COUNT(*) FROM games WHERE (status='playing_pro' OR (status='finished' AND round_number=100)) AND {not_only_admin_filter} {time_filter}"
 
+    # Переписані запити через jsonb_each_text для повної сумісності з типами даних Supabase
     sql_users = f"""
-        SELECT COUNT(DISTINCT user_id) FROM (
-            SELECT jsonb_object_keys(players)::bigint AS user_id FROM games 
+        SELECT COUNT(DISTINCT u.key) FROM (
+            SELECT key FROM games, jsonb_each_text(players)
             WHERE {not_only_admin_filter} {time_filter}
-        ) AS all_users
+        ) u
     """
     sql_pro = f"""
-        SELECT COUNT(DISTINCT user_id) FROM (
-            SELECT jsonb_object_keys(players)::bigint AS user_id FROM games 
+        SELECT COUNT(DISTINCT u.key) FROM (
+            SELECT key FROM games, jsonb_each_text(players)
             WHERE {not_only_admin_filter} {time_filter}
-        ) AS active_users
-        JOIN pro_users ON pro_users.user_id = active_users.user_id WHERE pro_users.is_pro = true
+        ) u
+        JOIN pro_users ON pro_users.user_id = u.key::bigint WHERE pro_users.is_pro = true
     """
 
     async with pool.acquire() as conn:
@@ -260,15 +302,13 @@ async def get_db_stats_isolated(pool, dt=None):
 # ЛОГІКА ХЕНДЛЕРІВ
 # ==========================================
 
-# 1. КОМАНДИ АДМІНІСТРАТОРА (Вручну в приватних повідомленнях)
-
 @dp.message(F.chat.type == "private", Command("free", "pro"))
 async def toggle_admin_status(message: types.Message):
     if message.from_user.id == ADMIN_ID:
         command = message.text.split()[0].replace("/", "").lower()
         if "pro" in command:
             await set_user_pro_status(ADMIN_ID, True)
-            await message.reply("Твій статус Pro")
+            await message.reply("Твій статус pro")
         else:
             await set_user_pro_status(ADMIN_ID, False)
             await message.reply("Твій статус free")
@@ -279,54 +319,56 @@ async def admin_stat(message: types.Message):
         pool = await get_db_connection()
         now = datetime.now()
         
-        res0, res1, res2, res3, res4 = await asyncio.gather(
-            get_db_stats_isolated(pool),
-            get_db_stats_isolated(pool, now - timedelta(days=365)),
-            get_db_stats_isolated(pool, now - timedelta(days=30)),
-            get_db_stats_isolated(pool, now - timedelta(days=7)),
-            get_db_stats_isolated(pool, now - timedelta(hours=24))
-        )
+        try:
+            res0, res1, res2, res3, res4 = await asyncio.gather(
+                get_db_stats_isolated(pool),
+                get_db_stats_isolated(pool, now - timedelta(days=365)),
+                get_db_stats_isolated(pool, now - timedelta(days=30)),
+                get_db_stats_isolated(pool, now - timedelta(days=7)),
+                get_db_stats_isolated(pool, now - timedelta(hours=24))
+            )
 
-        stat_text = (
-            f"ЗА ВЕСЬ ЧАС:\n"
-            f"- всі чати: {res0[0]}\n"
-            f"- всі ігри до 10: {res0[1]}\n"
-            f"- всі ігри до 100: {res0[2]}\n"
-            f"- всі юзери: {res0[3]}\n"
-            f"- free-юзери: {res0[4]}\n"
-            f"- pro-юзери: {res0[5]}\n\n"
-            f"ПРИРІСТ ЗА РІК:\n"
-            f"- всі чати: +{res1[0]}\n"
-            f"- всі ігри до 10: +{res1[1]}\n"
-            f"- всі ігри до 100: +{res1[2]}\n"
-            f"- всі юзери: +{res1[3]}\n"
-            f"- free-юзери: +{res1[4]}\n"
-            f"- pro-юзери: +{res1[5]}\n\n"
-            f"ПРИРІСТ ЗА 30 ДНІВ:\n"
-            f"- всі чати: +{res2[0]}\n"
-            f"- всі ігри до 10: +{res2[1]}\n"
-            f"- всі ігри до 100: +{res2[2]}\n"
-            f"- всі юзери: +{res2[3]}\n"
-            f"- free-юзери: +{res2[4]}\n"
-            f"- pro-юзери: +{res2[5]}\n\n"
-            f"ПРИРІСТ ЗА 7 ДНІВ:\n"
-            f"- всі чати: +{res3[0]}\n"
-            f"- всі ігри до 10: +{res3[1]}\n"
-            f"- всі ігри до 100: +{res3[2]}\n"
-            f"- всі юзери: +{res3[3]}\n"
-            f"- free-юзери: +{res3[4]}\n"
-            f"- pro-юзери: +{res3[5]}\n\n"
-            f"ПРИРІСТ ЗА 24 ГОД:\n"
-            f"- всі чати: +{res4[0]}\n"
-            f"- всі ігри до 10: +{res4[1]}\n"
-            f"- всі ігри до 100: +{res4[2]}\n"
-            f"- всі юзери: +{res4[3]}\n"
-            f"- free-юзери: +{res4[4]}\n"
-            f"- pro-юзери: +{res4[5]}"
-        )
-        await message.answer(stat_text)
-
-# 2. ПОСТ-ЗАГЛУШКА (Для приватних повідомлень)
+            stat_text = (
+                f"ЗА ВЕСЬ ЧАС:\n"
+                f"- всі чати: {res0[0]}\n"
+                f"- всі ігри до 10: {res0[1]}\n"
+                f"- всі ігри до 100: {res0[2]}\n"
+                f"- всі юзери: {res0[3]}\n"
+                f"- free-юзери: {res0[4]}\n"
+                f"- pro-юзери: {res0[5]}\n\n"
+                f"ПРИРІСТ ЗА РІК:\n"
+                f"- всі чати: +{res1[0]}\n"
+                f"- всі ігри до 10: +{res1[1]}\n"
+                f"- всі ігри до 100: +{res1[2]}\n"
+                f"- всі юзери: +{res1[3]}\n"
+                f"- free-юзери: +{res1[4]}\n"
+                f"- pro-юзери: +{res1[5]}\n\n"
+                f"ПРИРІСТ ЗА 30 ДНІВ:\n"
+                f"- всі чати: +{res2[0]}\n"
+                f"- всі ігри до 10: +{res2[1]}\n"
+                f"- всі ігри до 100: +{res2[2]}\n"
+                f"- всі юзери: +{res2[3]}\n"
+                f"- free-юзери: +{res2[4]}\n"
+                f"- pro-юзери: +{res2[5]}\n\n"
+                f"ПРИРІСТ ЗА 7 ДНІВ:\n"
+                f"- всі чати: +{res3[0]}\n"
+                f"- всі ігри до 10: +{res3[1]}\n"
+                f"- всі ігри до 100: +{res3[2]}\n"
+                f"- всі юзери: +{res3[3]}\n"
+                f"- free-юзери: +{res3[4]}\n"
+                f"- pro-юзери: +{res3[5]}\n\n"
+                f"ПРИРІСТ ЗА 24 ГОД:\n"
+                f"- всі чати: +{res4[0]}\n"
+                f"- всі ігри до 10: +{res4[1]}\n"
+                f"- всі ігри до 100: +{res4[2]}\n"
+                f"- всі юзери: +{res4[3]}\n"
+                f"- free-юзери: +{res4[4]}\n"
+                f"- pro-юзери: +{res4[5]}"
+            )
+            await message.answer(stat_text)
+        except Exception as e:
+            logger.error(f"Помилка при зборі статистики: {e}")
+            await message.answer(f"Помилка при виконанні запиту статистики: {e}")
 
 @dp.message(F.chat.type == "private")
 async def private_stub(message: types.Message):
@@ -336,12 +378,11 @@ async def private_stub(message: types.Message):
     text = "Щоб грати, додай мене у групу з іншими людьми (не в особисті чати, а саме у групу). Знайдеш мене по пошуку @stofotobot"
     await message.answer(text)
 
-# 3. ЛОГІКА ДЛЯ РОБОТИ У ГРУПАХ
-
 @dp.my_chat_member(ChatMemberUpdatedFilter(member_status_changed=JOIN_TRANSITION))
 async def bot_added_to_group(event: types.ChatMemberUpdated):
     chat_id = event.chat.id
     await save_game(chat_id, "registration", 0, {})
+    await asyncio.sleep(1.5)  # Даємо Telegram час на оновлення списку учасників чату
     try:
         await show_rules_or_limits(chat_id)
     except Exception as e:
@@ -350,9 +391,7 @@ async def bot_added_to_group(event: types.ChatMemberUpdated):
 @dp.chat_member()
 async def user_added_to_group(event: types.ChatMemberUpdated):
     chat_id = event.chat.id
-    
     if event.new_chat_member.status == "member" and event.old_chat_member.status in ["left", "kicked", "restricted"]:
-        # Незалежно від поточного статусу гри, якщо додається нова людина — надсилаємо повідомлення про зміну лімітів
         try:
             await show_rules_or_limits(chat_id)
         except Exception as e:
@@ -373,6 +412,7 @@ async def manual_start_in_group(message: types.Message):
             players[p_id]["score"] = 0
             
         await save_game(chat_id, "registration", 0, players, current_word_data)
+        await asyncio.sleep(0.5)
         try:
             await show_rules_or_limits(chat_id)
         except Exception as e:
@@ -384,47 +424,28 @@ async def show_rules_or_limits(chat_id: int):
     has_pro = await check_group_has_pro(chat_id)
 
     if has_pro:
-        if actual_humans == 1:
+        if actual_humans > 10:
             text = (
-                "Щоб грати, додайте в групу другого гравця.\n\n"
+                "Грати може максимум 10 людей.\n\n"
                 "Щоб перезапустити бота, напишіть в чат команду /start або /play."
             )
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="НОВА ГРА ДО 10", callback_data="start_free_10")]
-            ])
-            await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
-            return
-        elif actual_humans > 10:
-            text = (
-                "На жаль, грати може максимум 10 гравців.\n\n"
-                "Щоб перезапустити бота, напишіть в чат команду /start або /play."
-            )
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="НАС ВЖЕ 10", callback_data="noop")]
+                [InlineKeyboardButton(text="НАС ВЖЕ 10", callback_data="check_limit_pro")]
             ])
             await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
             return
     else:
-        if actual_humans == 1:
+        if actual_humans >= 3:
             text = (
-                "Щоб грати, додайте в групу другого гравця.\n\n"
-                "Щоб перезапустити бота, напишіть в чат команду /start або /play."
-            )
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="НОВА ГРА ДО 10", callback_data="start_free_10")]
-            ])
-            await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
-            return
-        elif actual_humans >= 3:
-            text = (
-                "Щоб грати втрьох і більше, хоча б 1 гравець має бути Pro.\n\n"
+                "Щоб грати втрьох і більше, хоч 1 гравець має бути pro.\n\n"
                 "Pro-версія гри:\n"
                 "- до 10 гравців\n"
                 "- до 100 раундів назавжди\n"
-                "- у всіх чатах Pro-гравця"
+                "- у всіх чатах pro-гравця"
             )
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="КУПИТИ PRO-ВЕРСІЮ", callback_data="start_pro_buy")]
+                [InlineKeyboardButton(text="КУПИТИ PRO-ВЕРСІЮ", callback_data="start_pro_buy")],
+                [InlineKeyboardButton(text="НАС ВЖЕ ДВОЄ", callback_data="check_limit_free")]
             ])
             await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
             return
@@ -432,10 +453,10 @@ async def show_rules_or_limits(chat_id: int):
     text = (
         "Правила гри:\n\n"
         "1. Завдання гравців – фотографувати числа (1, 2, 3) і надсилати у чат. Хто перший – отримує 1 бал.\n\n"
-        "2. Кожен раунд = 1 фото / 1 бал. Безоплатна гра триває 10 раундів, платна – 100.\n\n"
+        "2. Кожен раунд = 1 photo / 1 бал. Безкоштовна гра триває 10 раундів, платна – 100.\n\n"
         "3. Числа не можна писати чи викладати предметами. Можна лише фотографувати їх вдома, на вулиці тощо.\n\n"
         "4. Не можна брати двічі числа з однієї локації (сторінки книги, кнопки ліфту тощо). Локації мають бути різними.\n\n"
-        "5. Якщо надіслане foto не відповідає завданню, його можна відмінити і почати раунд заново.\n\n"
+        "5. Якщо надіслане фото не відповідає завданню, його можна відмінити і почати раунд заново.\n\n"
         "Бот реагує лише на фото і кнопки, тож можете вільно спілкуватись у чаті.\n\n"
         "Щоб перезапустити бота, напишіть /start або /play.\n\n"
         "Придумайте приз і гоу!"
@@ -443,6 +464,7 @@ async def show_rules_or_limits(chat_id: int):
 
     if has_pro:
         kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="НОВА ГРА ДО 100 (PRO)", callback_data="start_pro_game_active")],
             [InlineKeyboardButton(text="НОВА ГРА ДО 10", callback_data="start_free_10")]
         ])
     else:
@@ -454,25 +476,86 @@ async def show_rules_or_limits(chat_id: int):
         
     await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb, disable_web_page_preview=True)
 
+# ХЕНДЛЕРИ НАЖИВОЇ ПЕРЕВІРКИ КІЛЬКОСТІ ЛЮДЕЙ ЧЕРЕЗ КНОПКИ
+
+@dp.callback_query(F.data == "check_limit_free")
+async def check_limit_free_handler(callback: types.CallbackQuery):
+    chat_id = callback.message.chat.id
+    count = await get_chat_players_count(chat_id)
+    actual_humans = count - 1 if count > 0 else 1
+    has_pro = await check_group_has_pro(chat_id)
+    
+    if has_pro or actual_humans < 3:
+        game = await load_game(chat_id)
+        if game and game["status"] in ["playing_free", "playing_pro"]:
+            await send_current_round_post(chat_id, game)
+        else:
+            await show_rules_or_limits(chat_id)
+        await callback.message.delete()
+    else:
+        text = (
+            "Щоб грати втрьох і більше, хоч 1 гравець має бути pro.\n\n"
+            "Pro-версія гри:\n"
+            "- до 10 гравців\n"
+            "- до 100 раундів назавжди\n"
+            "- у всіх чатах pro-гравця"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="КУПИТИ PRO-ВЕРСІЮ", callback_data="start_pro_buy")],
+            [InlineKeyboardButton(text="НАС ВЖЕ ДВОЄ", callback_data="check_limit_free")]
+        ])
+        try:
+            await callback.message.edit_text(text=text, reply_markup=kb)
+        except Exception:
+            pass
+    await callback.answer()
+
+@dp.callback_query(F.data == "check_limit_pro")
+async def check_limit_pro_handler(callback: types.CallbackQuery):
+    chat_id = callback.message.chat.id
+    count = await get_chat_players_count(chat_id)
+    actual_humans = count - 1 if count > 0 else 1
+    
+    if actual_humans <= 10:
+        game = await load_game(chat_id)
+        if game and game["status"] in ["playing_free", "playing_pro"]:
+            await send_current_round_post(chat_id, game)
+        else:
+            await show_rules_or_limits(chat_id)
+        await callback.message.delete()
+    else:
+        text = (
+            "Грати може максимум 10 людей.\n\n"
+            "Щоб перезапустити бота, напишіть в чат команду /start або /play."
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="НАС ВЖЕ 10", callback_data="check_limit_pro")]
+        ])
+        try:
+            await callback.message.edit_text(text=text, reply_markup=kb)
+        except Exception:
+            pass
+    await callback.answer()
+
 @dp.callback_query(F.data == "start_free_10")
 async def start_free_game(callback: types.CallbackQuery):
     chat_id = callback.message.chat.id
     
-    # ПЕРЕВІРКА ЛІМІТІВ НАЖИВО ПЕРЕД СТАРТОМ:
     count = await get_chat_players_count(chat_id)
     actual_humans = count - 1 if count > 0 else 1
     has_pro = await check_group_has_pro(chat_id)
     
     if not has_pro and actual_humans >= 3:
         text = (
-            "Щоб грати втрьох і більше, хоча б 1 гравець має бути Pro.\n\n"
+            "Щоб грати втрьох і більше, хоч 1 гравець має бути pro.\n\n"
             "Pro-версія гри:\n"
             "- до 10 гравців\n"
             "- до 100 раундів назавжди\n"
-            "- у всіх чатах Pro-гравця"
+            "- у всіх чатах pro-гравця"
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="КУПИТИ PRO-ВЕРСІЮ", callback_data="start_pro_buy")]
+            [InlineKeyboardButton(text="КУПИТИ PRO-ВЕРСІЮ", callback_data="start_pro_buy")],
+            [InlineKeyboardButton(text="НАС ВЖЕ ДВОЄ", callback_data="check_limit_free")]
         ])
         await callback.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
         await callback.answer()
@@ -596,11 +679,11 @@ async def show_pro_payment(callback: types.CallbackQuery):
         "Pro-версія гри:\n"
         "- до 10 гравців\n"
         "- до 100 раундів назавжди\n"
-        "- у всіх чатах Pro-гравця"
+        "- у всіх чатах pro-гравця"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="КУПИТИ PRO-ВЕРСІЮ", url=mono_link)],
-        [InlineKeyboardButton(text="ПРОДОВЖИТИ ГРУ УДВОХ", callback_data="start_free_10")]
+        [InlineKeyboardButton(text="НОВА ГРА ДО 10", callback_data="start_free_10")]
     ])
     await callback.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
     await callback.answer()
@@ -712,25 +795,26 @@ async def handle_game_photo(message: types.Message):
             if len(players) >= 2:
                 if not await check_group_has_pro(chat_id):
                     text = (
-                        "Щоб грати втрьох і більше, хоча б 1 гравець має бути Pro.\n\n"
+                        "Щоб грати втрьох і більше, хоч 1 гравець має бути pro.\n\n"
                         "Pro-версія гри:\n"
                         "- до 10 гравців\n"
                         "- до 100 раундів назавжди\n"
-                        "- у всіх чатах Pro-гравця"
+                        "- у всіх чатах pro-гравця"
                     )
                     kb = InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="КУПИТИ PRO-ВЕРСІЮ", callback_data="start_pro_buy")]
+                        [InlineKeyboardButton(text="КУПИТИ PRO-ВЕРСІЮ", callback_data="start_pro_buy")],
+                        [InlineKeyboardButton(text="НАС ВЖЕ ДВОЄ", callback_data="check_limit_free")]
                     ])
                     await message.reply(text, reply_markup=kb)
                     return
         elif game["status"] == "playing_pro":
             if len(players) >= 10:
                 text = (
-                    "На жаль, грати може максимум 10 гравців.\n\n"
+                    "Грати може максимум 10 людей.\n\n"
                     "Щоб перезапустити бота, напишіть в чат команду /start або /play."
                 )
                 kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="НАС ВЖЕ 10", callback_data="noop")]
+                    [InlineKeyboardButton(text="НАС ВЖЕ 10", callback_data="check_limit_pro")]
                 ])
                 await message.reply(text, reply_markup=kb)
                 return
@@ -864,13 +948,14 @@ async def mono_webhook(request: Request):
                     u_name = f"@{user_row.username}" if user_row.username else user_row.first_name
                     
                     text = (
-                        "Дякую, оплата є!\n\n"
-                        f"– {u_name} тепер Pro\n"
-                        "– відкрито 100 раундів\n"
-                        "– відкрито 10 гравців"
+                        "Pro-версія гри:\n"
+                        "- до 10 гравців\n"
+                        "- до 100 раундів назавжди\n"
+                        "- у всіх чатах pro-гравця"
                     )
                     kb = InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="НОВА ГРА", callback_data="start_pro_game_active")]
+                        [InlineKeyboardButton(text="КУПИТИ PRO-ВЕРСІЮ", url=f"https://send.monobank.ua/jar/8Sg7bYg9Xb?a=100&m={user_id}")],
+                        [InlineKeyboardButton(text="НОВА ГРА ДО 10", callback_data="start_free_10")]
                     ])
                     await bot.send_message(chat_id=user_id, text=text, reply_markup=kb)
                 except Exception as e:
