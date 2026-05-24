@@ -91,7 +91,7 @@ async def init_db():
             UPDATE pro_users SET updated_at = CURRENT_TIMESTAMP WHERE updated_at IS NULL;
         ''')
         
-        logger.info("Таблиці v БД перевірено та успішно оновлено.")
+        logger.info("Таблиці в БД перевірено та успішно оновлено.")
 
 async def load_game(chat_id: int):
     pool = await get_db_connection()
@@ -347,21 +347,16 @@ async def bot_added_to_group(event: types.ChatMemberUpdated):
     except Exception as e:
         logger.error(f"Помилка відображення правил при додаванні: {e}")
 
-# Виправлено: правильний хендлер для відстеження додавання звичайних учасників до групи
 @dp.chat_member()
 async def user_added_to_group(event: types.ChatMemberUpdated):
     chat_id = event.chat.id
     
-    # Перевіряємо, чи це подія додавання нового користувача (статус змінився на member)
     if event.new_chat_member.status == "member" and event.old_chat_member.status in ["left", "kicked", "restricted"]:
-        game = await load_game(chat_id)
-        
-        # Реагуємо лише на етапі реєстрації/перевірки лімітів
-        if not game or game["status"] == "registration":
-            try:
-                await show_rules_or_limits(chat_id)
-            except Exception as e:
-                logger.error(f"Помилка перевірки лімітів при додаванні юзера: {e}")
+        # Незалежно від поточного статусу гри, якщо додається нова людина — надсилаємо повідомлення про зміну лімітів
+        try:
+            await show_rules_or_limits(chat_id)
+        except Exception as e:
+            logger.error(f"Помилка перевірки лімітів при додаванні юзера: {e}")
 
 @dp.message(Command("start", "play"))
 async def manual_start_in_group(message: types.Message):
@@ -388,11 +383,10 @@ async def show_rules_or_limits(chat_id: int):
     actual_humans = count - 1 if count > 0 else 1
     has_pro = await check_group_has_pro(chat_id)
 
-    # Перевірка лімітів кількості людей відповідно до файлу текстів
     if has_pro:
         if actual_humans == 1:
             text = (
-                "Щоб грати, додайте v групу другого гравця.\n\n"
+                "Щоб грати, додайте в групу другого гравця.\n\n"
                 "Щоб перезапустити бота, напишіть в чат команду /start або /play."
             )
             kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -413,7 +407,7 @@ async def show_rules_or_limits(chat_id: int):
     else:
         if actual_humans == 1:
             text = (
-                "Щоб грати, додайте v групу другого гравця.\n\n"
+                "Щоб грати, додайте в групу другого гравця.\n\n"
                 "Щоб перезапустити бота, напишіть в чат команду /start або /play."
             )
             kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -435,14 +429,13 @@ async def show_rules_or_limits(chat_id: int):
             await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
             return
 
-    # Якщо перевірки лімітів пройдені — надсилаємо чисті правила з правильними кнопками
     text = (
         "Правила гри:\n\n"
-        "1. Завдання гравців – photoграфувати числа (1, 2, 3) і надсилати у чат. Хто перший – отримує 1 бал.\n\n"
-        "2. Кожен раунд = 1 photo / 1 бал. Безоплатна гра триває 10 раундів, платна – 100.\n\n"
-        "3. Не можна викладати числа предметами чи писати самому. Можна лише фотографувати їх вдома, на вулиці тощо.\n\n"
+        "1. Завдання гравців – фотографувати числа (1, 2, 3) і надсилати у чат. Хто перший – отримує 1 бал.\n\n"
+        "2. Кожен раунд = 1 фото / 1 бал. Безоплатна гра триває 10 раундів, платна – 100.\n\n"
+        "3. Числа не можна писати чи викладати предметами. Можна лише фотографувати їх вдома, на вулиці тощо.\n\n"
         "4. Не можна брати двічі числа з однієї локації (сторінки книги, кнопки ліфту тощо). Локації мають бути різними.\n\n"
-        "5. Якщо надіслане фото не відповідає завданню, його можна відмінити і почати раунд заново.\n\n"
+        "5. Якщо надіслане foto не відповідає завданню, його можна відмінити і почати раунд заново.\n\n"
         "Бот реагує лише на фото і кнопки, тож можете вільно спілкуватись у чаті.\n\n"
         "Щоб перезапустити бота, напишіть /start або /play.\n\n"
         "Придумайте приз і гоу!"
@@ -465,6 +458,26 @@ async def show_rules_or_limits(chat_id: int):
 async def start_free_game(callback: types.CallbackQuery):
     chat_id = callback.message.chat.id
     
+    # ПЕРЕВІРКА ЛІМІТІВ НАЖИВО ПЕРЕД СТАРТОМ:
+    count = await get_chat_players_count(chat_id)
+    actual_humans = count - 1 if count > 0 else 1
+    has_pro = await check_group_has_pro(chat_id)
+    
+    if not has_pro and actual_humans >= 3:
+        text = (
+            "Щоб грати втрьох і більше, хоча б 1 гравець має бути Pro.\n\n"
+            "Pro-версія гри:\n"
+            "- до 10 гравців\n"
+            "- до 100 раундів назавжди\n"
+            "- у всіх чатах Pro-гравця"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="КУПИТИ PRO-ВЕРСІЮ", callback_data="start_pro_buy")]
+        ])
+        await callback.bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+        await callback.answer()
+        return
+
     if await check_and_handle_alone(chat_id, callback):
         return
         
