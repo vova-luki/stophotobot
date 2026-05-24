@@ -69,7 +69,7 @@ async def init_db():
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
         ''')
-        logger.info("Таблиці v БД перевірено.")
+        logger.info("Таблиці в БД перевірено.")
 
 async def load_game(chat_id: int):
     pool = await get_db_connection()
@@ -164,8 +164,8 @@ async def check_and_handle_alone(chat_id: int, callback: types.CallbackQuery = N
     
     if actual_humans < 2:
         text = (
-            "Щоб грати, додайте v групу другого гравця.\n\n"
-            "Щоб перезапустити бота, напишіть v чат команду /start або /play."
+            "Щоб грати, додайте в групу другого гравця.\n\n"
+            "Щоб перезапустити бота, напишіть в чат команду /start або /play."
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="НОВА ГРА ДО 10", callback_data="start_free_10")]
@@ -190,7 +190,7 @@ def generate_initial_scoreboard(players: dict) -> str:
         lines.append("player 2: 0")
     return "\n".join(lines)
 
-async def get_db_stats(conn, dt=None):
+async def get_db_stats_isolated(pool, dt=None):
     time_filter = "AND created_at >= $1" if dt else ""
     params = [dt] if dt else []
 
@@ -218,12 +218,13 @@ async def get_db_stats(conn, dt=None):
         JOIN pro_users ON pro_users.user_id = active_users.user_id WHERE pro_users.is_pro = true
     """
 
-    chats = await conn.fetchval(sql_chats, *params)
-    games_10 = await conn.fetchval(sql_games_10, *params)
-    games_100 = await conn.fetchval(sql_games_100, *params)
-    users = await conn.fetchval(sql_users, *params)
-    pro = await conn.fetchval(sql_pro, *params)
-    free = users - pro
+    async with pool.acquire() as conn:
+        chats = await conn.fetchval(sql_chats, *params)
+        games_10 = await conn.fetchval(sql_games_10, *params)
+        games_100 = await conn.fetchval(sql_games_100, *params)
+        users = await conn.fetchval(sql_users, *params)
+        pro = await conn.fetchval(sql_pro, *params)
+        free = users - pro
 
     return chats, games_10, games_100, users, free, pro
 
@@ -231,17 +232,18 @@ async def get_db_stats(conn, dt=None):
 # ЛОГІКА ХЕНДЛЕРІВ
 # ==========================================
 
-# 1. Ручні команди адміністратора в приватних повідомленнях
+# 1. КОМАНДИ АДМІНІСТРАТОРА (Вручну в приватних повідомленнях)
+
 @dp.message(F.chat.type == "private", Command("free", "pro"))
 async def toggle_admin_status(message: types.Message):
     if message.from_user.id == ADMIN_ID:
         command = message.text.split()[0].replace("/", "").lower()
         if command == "pro":
             await set_user_pro_status(ADMIN_ID, True)
-            await message.reply("Твій status Pro")
+            await message.reply("Твій статус Pro")
         else:
             await set_user_pro_status(ADMIN_ID, False)
-            await message.reply("Твій status free")
+            await message.reply("Твій статус free")
 
 @dp.message(F.chat.type == "private", Command("stat"))
 async def admin_stat(message: types.Message):
@@ -249,12 +251,14 @@ async def admin_stat(message: types.Message):
         pool = await get_db_connection()
         now = datetime.now()
         
-        async with pool.acquire() as conn:
-            res0 = await get_db_stats(conn)                      
-            res1 = await get_db_stats(conn, now - timedelta(days=365)) 
-            res2 = await get_db_stats(conn, now - timedelta(days=30))  
-            res3 = await get_db_stats(conn, now - timedelta(days=7))   
-            res4 = await get_db_stats(conn, now - timedelta(hours=24))  
+        # Асинхронне паралельне виконання всіх запитів статистики через пул підключень
+        res0, res1, res2, res3, res4 = await asyncio.gather(
+            get_db_stats_isolated(pool),
+            get_db_stats_isolated(pool, now - timedelta(days=365)),
+            get_db_stats_isolated(pool, now - timedelta(days=30)),
+            get_db_stats_isolated(pool, now - timedelta(days=7)),
+            get_db_stats_isolated(pool, now - timedelta(hours=24))
+        )
 
         stat_text = (
             f"ЗА ВЕСЬ ЧАС:\n"
@@ -295,18 +299,20 @@ async def admin_stat(message: types.Message):
         )
         await message.answer(stat_text)
 
-# 2. Фільтр для звичайних користувачів v особистих повідомленнях (чиста заглушка)
+# 2. ПОСТ-ЗАГЛУШКА (Для звичайних користувачів у приватних повідомленнях)
+
 @dp.message(F.chat.type == "private")
 async def private_stub(message: types.Message):
-    # Якщо пишеш ти (адмін) — бот просто ігнорує звичайний текст і нічого не надсилає
+    # Якщо це ти (адміністратор) — бот повністю ігнорує будь-який інший текст чи старт і мовчить
     if message.from_user.id == ADMIN_ID:
         return
         
-    # Для всіх інших людей — сувора заглушка без кнопок
-    text = "Щоб грати, додай мене у групу з іншими людьми (не v особисті чати, а саме у групу). Знайдеш мене по пошуку @stofotobot"
+    # Для всіх інших реальних людей — сувора текстова заглушка без кнопок
+    text = "Щоб грати, додай мене у групу з іншими людьми (не в особисті чати, а саме у групу). Знайдеш мене по пошуку @stofotobot"
     await message.answer(text)
 
-# 3. Логіка для роботи у групах
+# 3. ЛОГІКА ДЛЯ РОБОТИ У ГРУПАХ
+
 @dp.my_chat_member(ChatMemberUpdatedFilter(member_status_changed=JOIN_TRANSITION))
 async def bot_added_to_group(event: types.ChatMemberUpdated):
     chat_id = event.chat.id
@@ -339,41 +345,39 @@ async def manual_start_in_group(message: types.Message):
 async def show_rules_or_limits(chat_id: int):
     count = await get_chat_players_count(chat_id)
     actual_humans = count - 1 if count > 0 else 1
+    has_pro = await check_group_has_pro(chat_id)
 
-    if actual_humans < 2:
-        text = (
-            "Щоб грати, додайте v групу другого гравця.\n\n"
-            "Щоб перезапустити бота, напишіть v чат команду /start або /play."
-        )
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="НОВА ГРА ДО 10", callback_data="start_free_10")]
-        ])
-        await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
-        return
+    # Логіка для ПЛАТНОЇ гри (Pro)
+    if has_pro:
+        if actual_humans == 1:
+            await bot.send_message(chat_id=chat_id, text="1 людина в групі")
+            return
+        elif actual_humans > 10:
+            await bot.send_message(chat_id=chat_id, text="11 людей в групі")
+            return
 
-    if actual_humans > 10:
-        text = (
-            "На жаль, грати може максимум 10 гравців.\n\n"
-            "Щоб перезапустити бота, напишіть v чат команду /start або /play."
-        )
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="НАС ВЖЕ 10", callback_data="noop")]
-        ])
-        await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
-        return
+    # Логіка для БЕЗПЛАТНОЇ гри (Free)
+    else:
+        if actual_humans == 1:
+            await bot.send_message(chat_id=chat_id, text="1 людина в групі")
+            return
+        elif actual_humans >= 3:
+            await bot.send_message(chat_id=chat_id, text="3 людини в групі")
+            return
 
+    # Пост із правилами (відпрацьовує, якщо для Free людей рівно 2, а для Pro людей від 2 до 10)
     text = (
         "Правила гри:\n\n"
-        "1. Завдання гравців – photoграфувати числа (1, 2, 3) і надсилати у чат. Хто перший – отримує 1 бал.\n\n"
-        "2. Кожен раунд = 1 photo / 1 бал. Безоплатна гра триває 10 раундів, платна – 100.\n\n"
-        "3. Не можна викладати числа предметами чи писати самому. Можна лише photoграфувати їх вдома, на вулиці тощо.\n\n"
+        "1. Завдання гравців – фотографувати числа (1, 2, 3) і надсилати у чат. Хто перший – отримує 1 бал.\n\n"
+        "2. Кожен раунд = 1 фото / 1 бал. Безоплатна гра триває 10 раундів, платна – 100.\n\n"
+        "3. Не можна викладати числа предметами чи писати самому. Можна лише фотографувати їх вдома, на вулиці тощо.\n\n"
         "4. Не можна брати двічі числа з однієї локації (сторінки книги, кнопки ліфту тощо). Локації мають бути різними.\n\n"
-        "5. Якщо надіслане photo не відповідає завданню, його можна відмінити і почати раунд заново.\n\n"
+        "5. Якщо надіслане фото не відповідає завданню, його можна відмінити і почати раунд заново.\n\n"
         "Щоб перезапустити бота, напишіть /start або /play.\n\n"
         "Придумайте приз і гоу!"
     )
 
-    if await check_group_has_pro(chat_id):
+    if has_pro:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="НОВА ГРА ДО 10", callback_data="start_free_10")]
         ])
@@ -639,7 +643,7 @@ async def handle_game_photo(message: types.Message):
             if len(players) >= 10:
                 text = (
                     "На жаль, грати може максимум 10 гравців.\n\n"
-                    "Щоб перезапустити бота, напишіть v чат команду /start або /play."
+                    "Щоб перезапустити бота, напишіть в чат команду /start або /play."
                 )
                 kb = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="НАС ВЖЕ 10", callback_data="noop")]
@@ -786,7 +790,7 @@ async def mono_webhook(request: Request):
                     ])
                     await bot.send_message(chat_id=user_id, text=text, reply_markup=kb)
                 except Exception as e:
-                    logger.error(f"Не вдалося надіслати сповіщення v чат користувачу: {e}")
+                    logger.error(f"Не вдалося надіслати сповіщення в чат користувачу: {e}")
                     
     return Response(status_code=200)
 
