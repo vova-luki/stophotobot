@@ -69,7 +69,7 @@ async def init_db():
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
         ''')
-        logger.info("Таблиці в БД перевірено.")
+        logger.info("Таблиці v БД перевірено.")
 
 async def load_game(chat_id: int):
     pool = await get_db_connection()
@@ -164,8 +164,8 @@ async def check_and_handle_alone(chat_id: int, callback: types.CallbackQuery = N
     
     if actual_humans < 2:
         text = (
-            "Щоб грати, додайте в групу другого гравця.\n\n"
-            "Щоб перезапустити бота, напишіть в чат команду /start або /play."
+            "Щоб грати, додайте v групу другого гравця.\n\n"
+            "Щоб перезапустити бота, напишіть v чат команду /start або /play."
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="НОВА ГРА ДО 10", callback_data="start_free_10")]
@@ -231,6 +231,7 @@ async def get_db_stats(conn, dt=None):
 # ЛОГІКА ХЕНДЛЕРІВ
 # ==========================================
 
+# 1. Ручні команди адміністратора в приватних повідомленнях
 @dp.message(F.chat.type == "private", Command("free", "pro"))
 async def toggle_admin_status(message: types.Message):
     if message.from_user.id == ADMIN_ID:
@@ -248,7 +249,6 @@ async def admin_stat(message: types.Message):
         pool = await get_db_connection()
         now = datetime.now()
         
-        # Послідовне виконання запитів без паралельного блокування з'єднання
         async with pool.acquire() as conn:
             res0 = await get_db_stats(conn)                      
             res1 = await get_db_stats(conn, now - timedelta(days=365)) 
@@ -295,17 +295,18 @@ async def admin_stat(message: types.Message):
         )
         await message.answer(stat_text)
 
+# 2. Фільтр для звичайних користувачів v особистих повідомленнях (чиста заглушка)
 @dp.message(F.chat.type == "private")
 async def private_stub(message: types.Message):
+    # Якщо пишеш ти (адмін) — бот просто ігнорує звичайний текст і нічого не надсилає
     if message.from_user.id == ADMIN_ID:
         return
         
-    text = (
-        "Щоб грати, додай мене у групу з іншими людьми (не в особисті чати, а саме у групу).\n\n"
-        "Знайдеш мене через пошук – @stofotobot"
-    )
+    # Для всіх інших людей — сувора заглушка без кнопок
+    text = "Щоб грати, додай мене у групу з іншими людьми (не v особисті чати, а саме у групу). Знайдеш мене по пошуку @stofotobot"
     await message.answer(text)
 
+# 3. Логіка для роботи у групах
 @dp.my_chat_member(ChatMemberUpdatedFilter(member_status_changed=JOIN_TRANSITION))
 async def bot_added_to_group(event: types.ChatMemberUpdated):
     chat_id = event.chat.id
@@ -341,8 +342,8 @@ async def show_rules_or_limits(chat_id: int):
 
     if actual_humans < 2:
         text = (
-            "Щоб грати, додайте в групу другого гравця.\n\n"
-            "Щоб перезапустити бота, напишіть в чат команду /start або /play."
+            "Щоб грати, додайте v групу другого гравця.\n\n"
+            "Щоб перезапустити бота, напишіть v чат команду /start або /play."
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="НОВА ГРА ДО 10", callback_data="start_free_10")]
@@ -353,7 +354,7 @@ async def show_rules_or_limits(chat_id: int):
     if actual_humans > 10:
         text = (
             "На жаль, грати може максимум 10 гравців.\n\n"
-            "Щоб перезапустити бота, напишіть в чат команду /start або /play."
+            "Щоб перезапустити бота, напишіть v чат команду /start або /play."
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="НАС ВЖЕ 10", callback_data="noop")]
@@ -638,7 +639,7 @@ async def handle_game_photo(message: types.Message):
             if len(players) >= 10:
                 text = (
                     "На жаль, грати може максимум 10 гравців.\n\n"
-                    "Щоб перезапустити бота, напишіть в чат команду /start або /play."
+                    "Щоб перезапустити бота, напишіть v чат команду /start або /play."
                 )
                 kb = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="НАС ВЖЕ 10", callback_data="noop")]
@@ -740,8 +741,6 @@ async def bot_webhook(request: Request):
     except Exception:
         return Response(status_code=400)
     
-    # Огортаємо запуск апдейту в try/except, щоб помилки через видалені чати 
-    # ніколи не повертали статус 500 і не блокували чергу повідомлень бота
     try:
         update = types.Update(**data)
         await dp.feed_update(bot, update)
@@ -787,7 +786,7 @@ async def mono_webhook(request: Request):
                     ])
                     await bot.send_message(chat_id=user_id, text=text, reply_markup=kb)
                 except Exception as e:
-                    logger.error(f"Не вдалося надіслати сповіщення в чат користувачу: {e}")
+                    logger.error(f"Не вдалося надіслати сповіщення v чат користувачу: {e}")
                     
     return Response(status_code=200)
 
