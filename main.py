@@ -710,9 +710,11 @@ async def send_stats(message: types.Message) -> None:
         date_clause_sessions = "AND created_at >= $2" if since else ""
         date_clause_history = "AND created_at >= $2" if since else ""
         date_clause_users = "AND created_at >= $2" if since else ""
-        params = [str(ADMIN_ID)]
+        text_params: list[Any] = [str(ADMIN_ID)]
+        int_params: list[Any] = [ADMIN_ID]
         if since:
-            params.append(since)
+            text_params.append(since)
+            int_params.append(since)
 
         async with pool.acquire() as conn:
             chats = await conn.fetchval(
@@ -725,7 +727,7 @@ async def send_stats(message: types.Message) -> None:
                 )
                 {date_clause_sessions}
                 """,
-                *params,
+                *text_params,
             )
             games_free = await conn.fetchval(
                 f"""
@@ -738,7 +740,7 @@ async def send_stats(message: types.Message) -> None:
                 )
                 {date_clause_history}
                 """,
-                *params,
+                *text_params,
             )
             games_pro = await conn.fetchval(
                 f"""
@@ -751,11 +753,11 @@ async def send_stats(message: types.Message) -> None:
                 )
                 {date_clause_history}
                 """,
-                *params,
+                *text_params,
             )
             users = await conn.fetchval(
                 f"SELECT COUNT(*) FROM users WHERE user_id <> $1 {date_clause_users}",
-                *params,
+                *int_params,
             )
             pro_users = await conn.fetchval(
                 f"""
@@ -766,7 +768,7 @@ async def send_stats(message: types.Message) -> None:
                 AND pro_users.is_pro = TRUE
                 {date_clause_users}
                 """,
-                *params,
+                *int_params,
             )
         users = users or 0
         pro_users = pro_users or 0
@@ -791,7 +793,11 @@ async def send_stats(message: types.Message) -> None:
 @dp.message(F.chat.type == "private", Command("stat"))
 async def admin_stat(message: types.Message) -> None:
     if message.from_user and message.from_user.id == ADMIN_ID:
-        await send_stats(message)
+        try:
+            await send_stats(message)
+        except Exception as exc:
+            logger.exception("Admin stats failed: %s", exc)
+            await safe_answer_message(message, f"Помилка при виконанні статистики: {exc}")
 
 
 @dp.message(F.chat.type == "private", Command("free", "pro"))
