@@ -267,7 +267,6 @@ async def get_db_stats_isolated(pool, dt=None):
     sql_games_10 = f"SELECT COUNT(*) FROM games WHERE (status='playing_free' OR (status='finished' AND round_number=10) OR (status='registration' AND round_number=0)) AND {not_only_admin_filter} {time_filter}"
     sql_games_100 = f"SELECT COUNT(*) FROM games WHERE (status='playing_pro' OR (status='finished' AND round_number=100)) AND {not_only_admin_filter} {time_filter}"
 
-    # Переписані запити через jsonb_each_text для повної сумісності з типами даних Supabase
     sql_users = f"""
         SELECT COUNT(DISTINCT u.key) FROM (
             SELECT key FROM games, jsonb_each_text(players)
@@ -382,7 +381,7 @@ async def private_stub(message: types.Message):
 async def bot_added_to_group(event: types.ChatMemberUpdated):
     chat_id = event.chat.id
     await save_game(chat_id, "registration", 0, {})
-    await asyncio.sleep(1.5)  # Даємо Telegram час на оновлення списку учасників чату
+    await asyncio.sleep(1.5)
     try:
         await show_rules_or_limits(chat_id)
     except Exception as e:
@@ -452,7 +451,7 @@ async def show_rules_or_limits(chat_id: int):
 
     text = (
         "Правила гри:\n\n"
-        "1. Завдання гравців – фотографувати числа (1, 2, 3) і надсилати у чат. Хто перший – отримує 1 бал.\n\n"
+        "1. Завдання гравців – photo чисела (1, 2, 3) і надсилати у чат. Хто перший – отримує 1 бал.\n\n"
         "2. Кожен раунд = 1 photo / 1 бал. Безкоштовна гра триває 10 раундів, платна – 100.\n\n"
         "3. Числа не можна писати чи викладати предметами. Можна лише фотографувати їх вдома, на вулиці тощо.\n\n"
         "4. Не можна брати двічі числа з однієї локації (сторінки книги, кнопки ліфту тощо). Локації мають бути різними.\n\n"
@@ -475,8 +474,6 @@ async def show_rules_or_limits(chat_id: int):
         ])
         
     await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb, disable_web_page_preview=True)
-
-# ХЕНДЛЕРИ НАЖИВОЇ ПЕРЕВІРКИ КІЛЬКОСТІ ЛЮДЕЙ ЧЕРЕЗ КНОПКИ
 
 @dp.callback_query(F.data == "check_limit_free")
 async def check_limit_free_handler(callback: types.CallbackQuery):
@@ -945,7 +942,6 @@ async def mono_webhook(request: Request):
                 await set_user_pro_status(user_id, True)
                 try:
                     user_row = await bot.get_chat(user_id)
-                    u_name = f"@{user_row.username}" if user_row.username else user_row.first_name
                     
                     text = (
                         "Pro-версія гри:\n"
