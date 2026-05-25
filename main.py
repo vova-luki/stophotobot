@@ -232,7 +232,7 @@ async def send_current_round_post(chat_id: int, game: dict):
             f"{scoreboard}\n\n"
             f"Завдання: сфотографуй число 1."
         )
-   else:
+    else:
         text = (
             f"Раунд {round_num}\n\n"
             f"Рахунок\n"
